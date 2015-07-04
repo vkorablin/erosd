@@ -17,7 +17,7 @@ module.exports = function (grunt) {
     '/*! <%= pkg.title || pkg.name %> - v<%= pkg.version %> - <%= grunt.template.today("yyyy-mm-dd") %>\n' +
     '<%= pkg.homepage ? " * " + pkg.homepage + "\\n" : "" %>' +
     ' * Copyright (c) <%= grunt.template.today("yyyy") %> <%= pkg.author %>;\n' +
-    ' * Licensed <%= _.pluck(pkg.licenses, "type").join(", ") %>\n */\n', 
+    ' * Licensed <%= _.pluck(pkg.licenses, "type").join(", ") %>\n */\n',
     src: {
       js: ['src/app/**/*.js', '!src/app/eros.proto.js'],
       // specs: ['test/**/*.spec.js'],
@@ -32,7 +32,7 @@ module.exports = function (grunt) {
         'src/assets/bootstrap/css/bootstrap.css', // min.css is throwing exception
         'src/assets/bootstrap/css/bootstrap-theme.min.css',
         'src/assets/starbow-icons/style.css'
-      ], 
+      ],
       cssWatch: ['src/css/scss/*.scss'],
     },
     clean: ['<%= distdir %>/*', '<%= tmpdir %>/*'],
@@ -132,7 +132,7 @@ module.exports = function (grunt) {
           'src/assets/bootstrap/js/bootstrap.min.js',
           'components/html5-boilerplate/js/vendor/modernizr-2.6.2.min.js',
 
-          // Outdated jquery that may back-support more IE versions. 
+          // Outdated jquery that may back-support more IE versions.
           // Consider using last version (with migrate?)
           // 'components/html5-boilerplate/js/vendor/jquery-1.10.2.min.js',
 
@@ -149,7 +149,9 @@ module.exports = function (grunt) {
           'components/underscore/underscore-min.js',
           'components/ng-flow/dist/ng-flow-standalone.js',
 
-          'components/angular-translate/angular-translate.min.js'
+            'components/angular-translate/angular-translate.min.js',
+
+            'components/angular-ui-bootstrap/src/*/*.js'
 
         ],
         dest: '<%= distdir %>/components.js'

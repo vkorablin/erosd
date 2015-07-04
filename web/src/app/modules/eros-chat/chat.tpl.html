@@ -89,7 +89,24 @@
 					<div class="user-rank-block" style="background-color: {{user.stats.division | divisionColor}}">
 						<span ng-bind="user.stats.division" class="user-division"></span><span ng-hide="user.stats.division == 'P'" ng-bind="user.stats.divisionRank" class="user-rank" ></span>
 					</div>
-					<span ng-bind="user.username" class="user-username" style='color: {{user.stats.division | divisionColor}}'></span>
+					<span class="dropdown-toggle"
+                          dropdown-toggle
+                          ng-bind="user.username"
+                          class="user-username"
+                          style='color: {{user.stats.division | divisionColor}}'>
+                      <ul class="dropdown-menu">
+                        <li>
+                          <a href ng-click="openPrivUser(user.username)">
+                            Private Message
+                          </a>
+                        </li>
+                        <li>
+                          <a href ng-click="challenge(user.username)">
+                            Challenge
+                          </a>
+                        </li>
+                      </ul>
+                    </span>
 				</div>
 			</div>
 		</div>
