@@ -11,23 +11,23 @@ type ErosError interface {
 }
 
 type ErosErrorImpl struct {
-	desc string
-	code int
+    desc string
+    code int
 }
 
 func (err ErosErrorImpl) Error() string {
-	return err.desc;
+    return err.desc;
 }
 
 func (err ErosErrorImpl) Code() int {
-	return err.code;
+    return err.code;
 }
 
 func Error(desc string, code int) ErosError {
-	return ErosErrorImpl {
-		desc: desc,
-		code: code,
-	}
+    return ErosErrorImpl {
+        desc: desc,
+        code: code,
+    }
 }
 
 // Errors
@@ -35,7 +35,7 @@ var (
     // 1xx - INTERNAL SERVER ERRORS
     ErrDatabaseRead                     = Error("Database read error", 101)
     ErrDatabaseWrite                    = Error("Database write error", 102)
-	ErrDbInsert                         = Error("An error occured while writing to the database.", 102)
+    ErrDbInsert                         = Error("An error occured while writing to the database.", 102)
     ErrDiskRead                         = Error("Disk read error", 103)
     ErrDiskWrite                        = Error("Disk write error", 104)
     ErrAuthentication                   = Error("Authentication error", 105)
@@ -71,6 +71,7 @@ var (
     ErrNoCharacterInRegion              = Error("Can't queue on this region without a character on this region.", 401)
     ErrMatchmakingRequestCancelled      = Error("The matchmaking request was cancelled.", 402)
     ErrLongProcessUnavailable           = Error("Long process unavailable.", 403)
+    ErrWrongRegion                      = Error("Wrong region specified.", 404)
 
     // 5xx - CHAT ERRORS
     ErrChatRoomNotJoinable              = Error("Chat room not joinable.", 501)
@@ -84,5 +85,5 @@ var (
     ErrChatRoomNameTooShort             = Error("The chat room name is too short.", 509)
     ErrChatRateLimit                    = Error("Can't send message. Rate limit.", 510)
     ErrChatMessageTooLong               = Error("Can't send message. Message too long.", 511)
-	ErrChatRoomNotFound                 = Error("Chat room not found.", 512)
+    ErrChatRoomNotFound                 = Error("Chat room not found.", 512)
 )

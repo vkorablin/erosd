@@ -30,6 +30,8 @@ It has these top-level messages:
 	MatchmakingStats
 	ServerStats
 	Character
+	Challenge
+	ChallengeRequested
 	OAuthRequest
 	OAuthUrl
 	MatchParticipant
@@ -1073,6 +1075,38 @@ func (m *Character) GetVerificationPortrait() int32 {
 		return *m.VerificationPortrait
 	}
 	return 0
+}
+
+type Challenge struct {
+	Challengee       *string `protobuf:"bytes,1,req,name=challengee" json:"challengee,omitempty"`
+	XXX_unrecognized []byte  `json:"-"`
+}
+
+func (m *Challenge) Reset()         { *m = Challenge{} }
+func (m *Challenge) String() string { return proto.CompactTextString(m) }
+func (*Challenge) ProtoMessage()    {}
+
+func (m *Challenge) GetChallengee() string {
+	if m != nil && m.Challengee != nil {
+		return *m.Challengee
+	}
+	return ""
+}
+
+type ChallengeRequested struct {
+	Challenger       *UserStats `protobuf:"bytes,1,req,name=challenger" json:"challenger,omitempty"`
+	XXX_unrecognized []byte     `json:"-"`
+}
+
+func (m *ChallengeRequested) Reset()         { *m = ChallengeRequested{} }
+func (m *ChallengeRequested) String() string { return proto.CompactTextString(m) }
+func (*ChallengeRequested) ProtoMessage()    {}
+
+func (m *ChallengeRequested) GetChallenger() *UserStats {
+	if m != nil {
+		return m.Challenger
+	}
+	return nil
 }
 
 type OAuthRequest struct {

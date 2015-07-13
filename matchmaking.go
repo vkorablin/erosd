@@ -42,6 +42,12 @@ var (
 	matchmakingRadiusMultiplier     float64 = 5.00
 )
 
+type Challenge struct {
+	initiator *ClientConnection
+	target    *ClientConnection
+	region    BattleNetRegion
+}
+
 type Matchmaker struct {
 	// The actual matchmaker
 	register               chan *ClientConnection
@@ -52,6 +58,9 @@ type Matchmaker struct {
 	matchCache             map[int64]*MatchmakerMatch
 	matchParticipantCache  map[int64]*MatchmakerMatchParticipant
 	matchParticipantsCache map[int64][]*MatchmakerMatchParticipant
+	challenge              chan *Challenge
+	unchallenge            chan *ClientConnection
+	challenges             []*Challenge
 	logger                 *log.Logger
 	logFile                *os.File
 	sync.RWMutex
@@ -106,9 +115,20 @@ type MatchmakerMatchParticipant struct {
 	RatingMean   float64
 	RatingStdDev float64
 	QueueTime    float64
+	ViaChallenge bool
 }
 
-func initMatchmaking() {
+// In any language not designed for morons this is one line that doesn't need its own function.
+func (mm *Matchmaker) findMMPByUsername(username string) *MatchmakerParticipant {
+	for _, mmp := range mm.participants {
+		if mmp.client.Username == username {
+			return mmp;
+		}
+	}
+	return nil;
+}
+
+func initMatchmaking() *Matchmaker {
 	matchmaker = &Matchmaker{
 		register:     make(chan *ClientConnection, 256),
 		callback:     make(chan bool, 256),
@@ -124,6 +144,8 @@ func initMatchmaking() {
 		matchCache:             make(map[int64]*MatchmakerMatch),
 		matchParticipantCache:  make(map[int64]*MatchmakerMatchParticipant),
 		matchParticipantsCache: make(map[int64][]*MatchmakerMatchParticipant),
+		challenge:              make(chan *Challenge, 256),
+		unchallenge:            make(chan *ClientConnection, 256),
 	}
 
 	var logfile string = path.Join(logPath, fmt.Sprintf("%d-mm.log", os.Getpid()))
@@ -138,6 +160,15 @@ func initMatchmaking() {
 	}
 
 	go matchmaker.run()
+
+	return matchmaker
+}
+
+func NewChallengeParticipant(connection *ClientConnection) *MatchmakerParticipant {
+	mmp := NewMatchmakerParticipant(connection)
+	return mmp;
+	// TODO: thread the fact that this is challenge-based from here
+	// into a MatchmakerMatchParticipant that is eventually created.
 }
 
 func NewMatchmakerParticipant(connection *ClientConnection) *MatchmakerParticipant {
@@ -415,6 +446,25 @@ func (mm *Matchmaker) EndMatch(id int64) {
 
 }
 
+// Select a random map, trying to respect vetoes if possible.
+func (mm *Matchmaker) SelectMap(region BattleNetRegion, player1, player2 *MatchmakerParticipant) *Map {
+	vetoes1, _ := player1.connection.client.Vetoes()
+	vetoes2, _ := player2.connection.client.Vetoes()
+
+	selectedMap := maps.Random(region, vetoes1, vetoes2)
+	if selectedMap == nil {
+		selectedMap = maps.Random(region)
+	}
+	return selectedMap
+}
+
+// Match 2 players as part of a challenge.
+func (mm *Matchmaker) makeChallengeMatch(challenge *Challenge) {
+	mmp1 := NewMatchmakerParticipant(challenge.initiator)
+	mmp2 := NewMatchmakerParticipant(challenge.target)
+	mm.makeMatch(mmp1, mmp2, challenge.region)
+}
+
 //Match 2 players against each other.
 func (mm *Matchmaker) makeMatch(player1, player2 *MatchmakerParticipant, region BattleNetRegion) {
 	quality := player1.Quality(player2)
@@ -422,21 +472,16 @@ func (mm *Matchmaker) makeMatch(player1, player2 *MatchmakerParticipant, region 
 		mm.unregister <- player1.connection
 		mm.unregister <- player2.connection
 	}()
-	vetoes1, _ := player1.connection.client.Vetoes()
-	vetoes2, _ := player2.connection.client.Vetoes()
-	selectedMap := maps.Random(region, vetoes1, vetoes2)
+	selectedMap := mm.SelectMap(region, player1, player2)
 	if selectedMap == nil {
-		selectedMap = maps.Random(region)
-		if selectedMap == nil {
-			log.Println("No map found while matching", player1.client.Username, player2.client.Username)
-			go func() {
-				player1.abort <- true
-			}()
-			go func() {
-				player2.abort <- true
-			}()
-			return
-		}
+		log.Println("No map found while matching", player1.client.Username, player2.client.Username)
+		go func() {
+			player1.abort <- true
+		}()
+		go func() {
+			player2.abort <- true
+		}()
+		return
 	}
 	battleNetChannel := fmt.Sprintf("eros%d%d%d%d", region, player1.client.Id, player2.client.Id, rand.Intn(99))
 	erosChatRoom := cleanChatRoomName(fmt.Sprintf("MM%d%d%d", region, player1.client.Id, player2.client.Id))
@@ -597,8 +642,34 @@ func (mm *Matchmaker) run() {
 				delete(mm.regionParticipants[BATTLENET_REGION_KR], client)
 				delete(mm.regionParticipants[BATTLENET_REGION_CN], client)
 				delete(mm.regionParticipants[BATTLENET_REGION_SEA], client)
-			}
+			case challenge := <-mm.challenge:
+				for _, other := range mm.challenges {
+					// Is this a reciprocal challenge?
+					if other.initiator == challenge.target && other.target == challenge.initiator {
+						// Yes. Do the regions match? They should, but just in case.
+						if challenge.region == other.region {
+							// Everything matches, let's go.
+							//go mm.makeMatch(mmp1, mmp2, challenge.region)
+							go mm.makeChallengeMatch(challenge)
+						} else {
 
+						}
+
+					} else {
+						// Not reciprocal.
+						mm.challenges = append(mm.challenges, *challenge)
+					}
+				}
+			case conn := <-mm.unchallenge:
+				// Why doesn't this godforsaken language have
+				// filter(slice, predicate)?
+				filtered := mm.challenges[0:]
+				for _, _ch := range mm.challenges {
+					if _ch.initiator.client.Username != conn.client.Username || _ch.target.client.Username != conn.client.Username {
+						filtered = append(filtered, _ch)
+					}
+				}
+			}
 		}
 	}()
 }

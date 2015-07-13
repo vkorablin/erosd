@@ -3,408 +3,409 @@ package main
 // Connection handler logic
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/base64"
-	"fmt"
-	"github.com/Starbow/erosd/buffers"
-	"github.com/gorilla/websocket"
-	"io"
-	"io/ioutil"
-	"log"
-	"math/rand"
-	"net"
-	"os"
-	"path"
-	"regexp"
-	"runtime/debug"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
-	proto "github.com/golang/protobuf/proto"
+    "bufio"
+    "bytes"
+    "encoding/base64"
+    "fmt"
+    "github.com/Starbow/erosd/buffers"
+    "github.com/gorilla/websocket"
+    "io"
+    "io/ioutil"
+    "log"
+    "math/rand"
+    "net"
+    "os"
+    "path"
+    "regexp"
+    "runtime/debug"
+    "strings"
+    "sync"
+    "sync/atomic"
+    "time"
+    proto "github.com/golang/protobuf/proto"
 )
 
+type ClientConnectionsType map[int64]*ClientConnection
+
 var (
-	clientConnections map[int64]*ClientConnection = make(map[int64]*ClientConnection)
-	activeClients     map[int64]*ClientConnection = make(map[int64]*ClientConnection)
-	usernameValidator *regexp.Regexp              = regexp.MustCompile(`^[a-zA-Z0-9_\-]{3,15}$`)
-	connectionIdBase  int64                       = 0
-	activeOAuths      map[string]OAuthRequest     = make(map[string]OAuthRequest)
+    clientConnections ClientConnectionsType       = make(map[int64]*ClientConnection)
+    activeClients     map[int64]*ClientConnection = make(map[int64]*ClientConnection)
+    usernameValidator *regexp.Regexp              = regexp.MustCompile(`^[a-zA-Z0-9_\-]{3,15}$`)
+    connectionIdBase  int64                       = 0
+    activeOAuths      map[string]OAuthRequest     = make(map[string]OAuthRequest)
 )
 
 type ClientConnectionType int
 
-func findClientsByName(connections map[int64]*ClientConnection, name string) []*ClientConnection {
-	var result []*ClientConnection
-	var lowerName = strings.ToLower(name)
-	for _, cc := range clientConnections {
-		if cc.client != nil && strings.ToLower(cc.client.Username) == lowerName {
-			result = append(result, cc)
-		}
-	}
-	return result
+func (connections ClientConnectionsType) findClientsByName(name string) []*ClientConnection {
+    var result []*ClientConnection
+    var lowerName = strings.ToLower(name)
+    for _, cc := range clientConnections {
+        if cc.client != nil && strings.ToLower(cc.client.Username) == lowerName {
+            result = append(result, cc)
+        }
+    }
+    return result
 }
 
 func (this ClientConnectionType) String() string {
-	switch this {
-	case CLIENT_CONNECTION_TYPE_SOCKET:
-		return "Socket"
-	case CLIENT_CONNECTION_TYPE_WEBSOCKET:
-		return "Websocket"
-	default:
-		return "Unknown"
-	}
+    switch this {
+    case CLIENT_CONNECTION_TYPE_SOCKET:
+        return "Socket"
+    case CLIENT_CONNECTION_TYPE_WEBSOCKET:
+        return "Websocket"
+    default:
+        return "Unknown"
+    }
 }
 
 const MAXIMUM_DATA_SIZE = 500 * 1024
 const READ_BUFFER_SIZE = 4096
 const PING_TIMEOUT = 60
 const (
-	CLIENT_CONNECTION_TYPE_SOCKET    ClientConnectionType = iota
-	CLIENT_CONNECTION_TYPE_WEBSOCKET ClientConnectionType = iota
+    CLIENT_CONNECTION_TYPE_SOCKET    ClientConnectionType = iota
+    CLIENT_CONNECTION_TYPE_WEBSOCKET ClientConnectionType = iota
 )
 
 type ClientConnection struct {
-	id                int64 // Connection ID
-	connType          ClientConnectionType
-	conn              interface{}
-	reader            *bufio.Reader
-	writer            *bufio.Writer
-	authenticated     bool
-	superUser         bool // Maybe allow certain users special functions.
-	client            *Client
-	logger            *log.Logger
-	logFile           *os.File
-	lastactive        time.Time
-	lastPing          time.Time
-	lastPingChallenge string
-	latency           int64
+    id                int64 // Connection ID
+    connType          ClientConnectionType
+    conn              interface{}
+    reader            *bufio.Reader
+    writer            *bufio.Writer
+    authenticated     bool
+    superUser         bool // Maybe allow certain users special functions.
+    client            *Client
+    logger            *log.Logger
+    logFile           *os.File
+    lastactive        time.Time
+    lastPing          time.Time
+    lastPingChallenge string
+    latency           int64
 
-	lastPong time.Time
+    lastPong time.Time
 
-	chatRooms map[string]*ChatRoom // List of rooms we're in.
+    chatRooms map[string]*ChatRoom // List of rooms we're in.
 
-	sync.RWMutex
+    sync.RWMutex
 }
 
 func newClientConnection(conn interface{}, connType ClientConnectionType) (clientConn *ClientConnection) {
-	clientConn = &ClientConnection{
-		id:            atomic.AddInt64(&connectionIdBase, 1),
-		conn:          conn,
-		authenticated: false,
-		chatRooms:     make(map[string]*ChatRoom),
-	}
+    clientConn = &ClientConnection{
+        id:            atomic.AddInt64(&connectionIdBase, 1),
+        conn:          conn,
+        authenticated: false,
+        chatRooms:     make(map[string]*ChatRoom),
+    }
 
-	var logfile string = path.Join(logPath, fmt.Sprintf("%d-conn-%d.log", os.Getpid(), clientConn.id))
-	file, err := os.Create(logfile)
-	if err != nil {
-		log.Println("Failed to create log file", logfile, "for new", connType.String(), "connection from", clientConn.RemoteAddr().String())
-		clientConn.logger = log.New(os.Stdout, fmt.Sprintf("conn-%d:", clientConn.id), log.Ldate|log.Ltime|log.Lshortfile)
-	} else {
-		log.Println("Logging new", connType.String(), "connection from", clientConn.RemoteAddr().String(), "to", logfile)
-		clientConn.logger = log.New(file, "", log.Ldate|log.Ltime|log.Lshortfile)
-		clientConn.logFile = file
-		clientConn.logger.Println("Logging new", connType.String(), "connection from", clientConn.RemoteAddr().String(), "to", logfile)
-	}
+    var logfile string = path.Join(logPath, fmt.Sprintf("%d-conn-%d.log", os.Getpid(), clientConn.id))
+    file, err := os.Create(logfile)
+    if err != nil {
+        log.Println("Failed to create log file", logfile, "for new", connType.String(), "connection from", clientConn.RemoteAddr().String())
+        clientConn.logger = log.New(os.Stdout, fmt.Sprintf("conn-%d:", clientConn.id), log.Ldate|log.Ltime|log.Lshortfile)
+    } else {
+        log.Println("Logging new", connType.String(), "connection from", clientConn.RemoteAddr().String(), "to", logfile)
+        clientConn.logger = log.New(file, "", log.Ldate|log.Ltime|log.Lshortfile)
+        clientConn.logFile = file
+        clientConn.logger.Println("Logging new", connType.String(), "connection from", clientConn.RemoteAddr().String(), "to", logfile)
+    }
 
-	clientConnections[clientConn.id] = clientConn
-	return clientConn
+    clientConnections[clientConn.id] = clientConn
+    return clientConn
 }
 
 func NewClientConnection(conn net.Conn) (clientConn *ClientConnection) {
-	clientConn = newClientConnection(conn, CLIENT_CONNECTION_TYPE_SOCKET)
-	clientConn.reader = bufio.NewReader(conn)
-	clientConn.writer = bufio.NewWriter(conn)
-	return
+    clientConn = newClientConnection(conn, CLIENT_CONNECTION_TYPE_SOCKET)
+    clientConn.reader = bufio.NewReader(conn)
+    clientConn.writer = bufio.NewWriter(conn)
+    return
 }
 
 func NewWebsocketClientConnection(conn websocket.Conn) (clientConn *ClientConnection) {
-	conn.SetReadLimit(MAXIMUM_DATA_SIZE + 1024)
-	conn.SetReadDeadline(time.Now().Add(PING_TIMEOUT * time.Second))
+    conn.SetReadLimit(MAXIMUM_DATA_SIZE + 1024)
+    conn.SetReadDeadline(time.Now().Add(PING_TIMEOUT * time.Second))
 
-	return newClientConnection(conn, CLIENT_CONNECTION_TYPE_WEBSOCKET)
-}
-
-func DisconnectClient(id int64, command string) {
-	for _, v := range clientConnections {
-		if v != nil {
-			if v.client.Id == id {
-				v.SendServerMessage(command, []byte{})
-				v.Close()
-			}
-		}
-	}
+    return newClientConnection(conn, CLIENT_CONNECTION_TYPE_WEBSOCKET)
 }
 
 func (this *ClientConnection) RemoteAddr() net.Addr {
-	switch this.conn.(type) {
-	case net.Conn:
-		conn := this.conn.(net.Conn)
-		return conn.RemoteAddr()
-	case websocket.Conn:
-		conn := this.conn.(websocket.Conn)
-		return conn.RemoteAddr()
-	}
+    switch this.conn.(type) {
+    case net.Conn:
+        conn := this.conn.(net.Conn)
+        return conn.RemoteAddr()
+    case websocket.Conn:
+        conn := this.conn.(websocket.Conn)
+        return conn.RemoteAddr()
+    }
 
-	return nil
+    return nil
 }
 
 func (conn *ClientConnection) panicRecovery(txid int) {
-	if r := recover(); r != nil {
-		fmt.Println("Recovered from a panic", r)
-		debug.PrintStack()
+    if r := recover(); r != nil {
+        fmt.Println("Recovered from a panic", r)
+        debug.PrintStack()
 
-		conn.SendError(ErrGeneric, txid)
-		// Do we want to disconnect the client here? Might be safer.
-	}
+        conn.SendError(ErrGeneric, txid)
+        // Do we want to disconnect the client here? Might be safer.
+    }
 }
 
 // Read the next message from a regular socket
 func (conn *ClientConnection) readPayload(reader *bufio.Reader) (event string, txid int, length int, data []byte, err error) {
-	data = make([]byte, 0)
-	var line string
-	line, err = reader.ReadString('\n')
+    data = make([]byte, 0)
+    var line string
+    line, err = reader.ReadString('\n')
 
-	if err != nil {
-		// If the error isn't a straight disconnection, print it
-		if err != io.EOF {
-			conn.logger.Println("Socket Error", err)
-		}
-		return
-	}
-	var unpackErr error
-	event, txid, length, unpackErr = Unpack(line)
-	if unpackErr != nil {
-		err = unpackErr
-		return
-	}
+    if err != nil {
+        // If the error isn't a straight disconnection, print it
+        if err != io.EOF {
+            conn.logger.Println("Socket Error", err)
+        }
+        return
+    }
+    var unpackErr error
+    event, txid, length, unpackErr = Unpack(line)
+    if unpackErr != nil {
+        err = unpackErr
+        return
+    }
 
-	if length > MAXIMUM_DATA_SIZE {
-		err = io.EOF
-		return
-	}
+    if length > MAXIMUM_DATA_SIZE {
+        err = io.EOF
+        return
+    }
 
-	var buffer bytes.Buffer
-	if length > 0 {
+    var buffer bytes.Buffer
+    if length > 0 {
 
-		var written int64
-		written, err = io.CopyN(&buffer, reader, int64(length))
-		if err != nil {
+        var written int64
+        written, err = io.CopyN(&buffer, reader, int64(length))
+        if err != nil {
 
-			conn.logger.Println(err)
-			return
-		}
+            conn.logger.Println(err)
+            return
+        }
 
-		if written != int64(length) {
-			conn.logger.Println("Expecting", length, "got", written)
-			err = io.ErrUnexpectedEOF
-		}
+        if written != int64(length) {
+            conn.logger.Println("Expecting", length, "got", written)
+            err = io.ErrUnexpectedEOF
+        }
 
-		data = buffer.Bytes()
-	}
+        data = buffer.Bytes()
+    }
 
-	return
+    return
 }
 
 // Client data reader loop goroutine
 func (conn *ClientConnection) read() {
-	defer conn.panicRecovery(0)
-	//Some hard core cleanuppery.
-	defer func() {
+    defer conn.panicRecovery(0)
+    //Some hard core cleanuppery.
+    defer func() {
 
-		// Handle removing the user from any matchmaking or lobbies they may be in
-		delete(clientConnections, conn.id)
-		if conn.client != nil {
-			delete(clientCharacters, conn.client.Id)
-		}
-		conn.Close()
+        // Handle removing the user from any matchmaking or lobbies they may be in
+        delete(clientConnections, conn.id)
+        if conn.client != nil {
+            delete(clientCharacters, conn.client.Id)
+        }
+        conn.Close()
 
-		// Dequeue from matchmaking if we're in it.
-		el, ok := matchmaker.participants[conn]
-		if ok {
-			go func() {
-				matchmaker.unregister <- conn
-				el.abort <- true
-			}()
-		}
+        // Dequeue from matchmaking if we're in it.
+        el, ok := matchmaker.participants[conn]
+        if ok {
+            go func() {
+                matchmaker.unregister <- conn
+                el.abort <- true
+            }()
+        }
 
-		// Leave all channels.
-		for x := range conn.chatRooms {
-			conn.chatRooms[x].leave <- conn
-		}
+        // Leave all channels.
+        for x := range conn.chatRooms {
+            conn.chatRooms[x].leave <- conn
+        }
 
-		if conn.logFile != nil {
-			conn.logFile.Close()
-		}
+        if conn.logFile != nil {
+            conn.logFile.Close()
+        }
 
-		// Accept draw/noshow if we're marked as that.
-		if conn.client != nil {
-			delete(activeClients, conn.client.Id)
-			if conn.client.PendingMatchmakingId == nil {
-				return
-			}
+        // Accept draw/noshow if we're marked as that.
+        if conn.client != nil {
+            delete(activeClients, conn.client.Id)
+            if conn.client.PendingMatchmakingId == nil {
+                return
+            }
 
-			match := matchmaker.Match(*conn.client.PendingMatchmakingId)
-			if match == nil {
-				return
-			}
+            match := matchmaker.Match(*conn.client.PendingMatchmakingId)
+            if match == nil {
+                return
+            }
 
-			if !match.longProcessActive {
-				return
-			}
+            if !match.longProcessActive {
+                return
+            }
 
-			if match.longProcessInitiator.Id != conn.client.Id {
-				match.longProcessResponse <- true
-			}
-		}
-	}()
+            if match.longProcessInitiator.Id != conn.client.Id {
+                match.longProcessResponse <- true
+            }
+        }
+    }()
 
-	// If we're not authed after 30 seconds then disconnect.
-	go func() {
-		ticker := time.NewTicker(time.Second * 30)
-		for _ = range ticker.C {
-			if conn.client == nil {
-				conn.Close()
-			}
-
-			return
-		}
-	}()
-
-	// Ping/pongery
-
-	go func() {
-		ticker := time.NewTicker(time.Second * (PING_TIMEOUT / 2))
-		for _ = range ticker.C {
-			if conn.lastPingChallenge != "" {
-				if time.Since(conn.lastPong).Seconds() > PING_TIMEOUT {
-					// ping timeout
-					conn.Close()
-					return
-				}
-			}
-
-			switch conn.conn.(type) {
-			case websocket.Conn:
-				ws := conn.conn.(websocket.Conn)
-				ws.SetReadDeadline(time.Now().Add(PING_TIMEOUT * time.Second))
-			}
-
-			conn.lastPing = time.Now()
-			conn.lastPingChallenge = fmt.Sprintf("%d", conn.lastPing.Second()*conn.lastPing.Minute())
-			err := conn.SendServerMessage("PNG", []byte(conn.lastPingChallenge))
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	//Infinite loop
-	for {
-
-		var (
-			event  string
-			txid   int
-			length int
-			data   []byte
-			err    error
-		)
-		switch conn.conn.(type) {
-		case net.Conn:
-			event, txid, length, data, err = conn.readPayload(conn.reader)
-		case websocket.Conn:
-			ws := conn.conn.(websocket.Conn)
-			_, r, err := ws.NextReader()
-			if err != nil {
-				return
-			}
-			reader := bufio.NewReader(r)
-
-			event, txid, length, data, err = conn.readPayload(reader)
-			var decoded []byte = make([]byte, base64.StdEncoding.DecodedLen(len(data)))
-			decodedLength, _ := base64.StdEncoding.Decode(decoded, data)
-			data = decoded[:decodedLength]
-		}
-
-		if length > MAXIMUM_DATA_SIZE {
-			conn.logger.Printf("Connection from %s exceeded max data size (%d)", conn.RemoteAddr().String(), length)
-			return
-		}
-
-		if err != nil {
-			return
-		}
-		conn.Lock()
-		conn.lastactive = time.Now()
-		conn.Unlock()
-
-		conn.logger.Println("recv:", event, length)
-
+    // If we're not authed after 30 seconds then disconnect.
+    go func() {
+		<- time.After(time.Second * 30)
 		if conn.client == nil {
-			if event == "HSH" {
-				if !conn.OnHandshake(txid, data) {
-					return
-				} else {
-					stats := NewServerStats()
-					conn.SendMarshalledServerMessage("SSU", txid, stats)
-
-					conn.handlePendingMatchmaking(-1)
-
-					for _, roomname := range autoJoinChatRooms {
-						chat := GetChatRoom(roomname, "", true, true)
-						if chat != nil {
-							chat.join <- conn
-						}
-					}
-				}
-			} else {
-				return
-			}
-		} else {
-			// dispatch
-			switch event {
-			case "SIM":
-				go conn.OnSimulation(txid, data)
-			case "MMQ":
-				go conn.OnQueueMatchmaking(txid, data)
-			case "MMD":
-				go conn.OnDequeueMatchmaking(txid, data)
-			case "MMF":
-				go conn.OnForfeitMatchmaking(txid, data)
-			case "BNA":
-				go conn.OnAddCharacter(txid, data)
-			case "BNN":
-				go conn.OnAuthCharacter(txid, data) // New method for OAuth2 request
-			case "BNU":
-				go conn.OnUpdateCharacter(txid, data)
-			case "BNR":
-				go conn.OnRemoveCharacter(txid, data)
-			case "REP":
-				go conn.OnReplay(txid, data)
-			case "PNR":
-				go conn.OnPong(txid, data)
-			case "UCJ":
-				go conn.OnChatJoin(txid, data)
-			case "UCL":
-				go conn.OnChatLeave(txid, data)
-			case "UCM":
-				go conn.OnChatMessage(txid, data)
-			case "UPM":
-				go conn.OnPrivateMessage(txid, data)
-			case "UCH":
-				go conn.OnChatHistory(txid, data)
-			case "UCI":
-				go conn.OnChatIndex(txid, data)
-			case "RLP":
-				go conn.OnLongProcessRequest(txid, data)
-			case "LPR":
-				go conn.OnLongProcessResponse(txid, data)
-			case "VET":
-				go conn.OnToggleVeto(txid, data)
-			}
+			conn.Close()
 		}
-	}
+    }()
+
+    // Ping/pongery
+
+    go func() {
+        ticker := time.NewTicker(time.Second * (PING_TIMEOUT / 2))
+        for _ = range ticker.C {
+            if conn.lastPingChallenge != "" {
+                if time.Since(conn.lastPong).Seconds() > PING_TIMEOUT {
+                    // ping timeout
+                    conn.Close()
+                    return
+                }
+            }
+
+            switch conn.conn.(type) {
+            case websocket.Conn:
+                ws := conn.conn.(websocket.Conn)
+                ws.SetReadDeadline(time.Now().Add(PING_TIMEOUT * time.Second))
+            }
+
+            conn.lastPing = time.Now()
+            conn.lastPingChallenge = fmt.Sprintf("%d", conn.lastPing.Second()*conn.lastPing.Minute())
+            err := conn.SendServerMessage("PNG", []byte(conn.lastPingChallenge))
+            if err != nil {
+                return
+            }
+        }
+    }()
+
+    //Infinite loop
+    for {
+
+        var (
+            event  string
+            txid   int
+            length int
+            data   []byte
+            err    error
+        )
+        switch conn.conn.(type) {
+        case net.Conn:
+            event, txid, length, data, err = conn.readPayload(conn.reader)
+        case websocket.Conn:
+            ws := conn.conn.(websocket.Conn)
+            _, r, err := ws.NextReader()
+            if err != nil {
+                return
+            }
+            reader := bufio.NewReader(r)
+
+            event, txid, length, data, err = conn.readPayload(reader)
+            var decoded []byte = make([]byte, base64.StdEncoding.DecodedLen(len(data)))
+            decodedLength, _ := base64.StdEncoding.Decode(decoded, data)
+            data = decoded[:decodedLength]
+        }
+
+        if length > MAXIMUM_DATA_SIZE {
+            conn.logger.Printf("Connection from %s exceeded max data size (%d)", conn.RemoteAddr().String(), length)
+            return
+        }
+
+        if err != nil {
+            return
+        }
+        conn.Lock()
+        conn.lastactive = time.Now()
+        conn.Unlock()
+
+        conn.logger.Println("recv:", event, length)
+
+        if conn.client == nil {
+            if event == "HSH" {
+                if !conn.OnHandshake(txid, data) {
+                    return
+                } else {
+                    stats := NewServerStats()
+                    conn.SendMarshalledServerMessage("SSU", txid, stats)
+
+                    conn.handlePendingMatchmaking(-1)
+
+                    for _, roomname := range autoJoinChatRooms {
+                        chat := GetChatRoom(roomname, "", true, true)
+                        if chat != nil {
+                            chat.join <- conn
+                        }
+                    }
+                }
+            } else {
+                return
+            }
+        } else {
+            // dispatch
+            conn.dispatch(event, txid, data)
+        }
+    }
+}
+
+func (conn *ClientConnection) dispatch(event string, txid int, data []byte) {
+    defer conn.panicRecovery(txid)
+    switch event {
+    case "SIM":
+        go conn.OnSimulation(txid, data)
+    case "MMQ":
+        go conn.OnQueueMatchmaking(txid, data)
+    case "MMD":
+        go conn.OnDequeueMatchmaking(txid, data)
+    case "MMF":
+        go conn.OnForfeitMatchmaking(txid, data)
+    case "BNA":
+        go conn.OnAddCharacter(txid, data)
+    case "BNN":
+        go conn.OnAuthCharacter(txid, data) // New method for OAuth2 request
+    case "BNU":
+        go conn.OnUpdateCharacter(txid, data)
+    case "BNR":
+        go conn.OnRemoveCharacter(txid, data)
+    case "REP":
+        go conn.OnReplay(txid, data)
+    case "PNR":
+        go conn.OnPong(txid, data)
+    case "UCJ":
+        go conn.OnChatJoin(txid, data)
+    case "UCL":
+        go conn.OnChatLeave(txid, data)
+    case "UCM":
+        go conn.OnChatMessage(txid, data)
+    case "UPM":
+        go conn.OnPrivateMessage(txid, data)
+    case "UCH":
+        go conn.OnChatHistory(txid, data)
+    case "UCI":
+        go conn.OnChatIndex(txid, data)
+    case "RLP":
+        go conn.OnLongProcessRequest(txid, data)
+    case "LPR":
+        go conn.OnLongProcessResponse(txid, data)
+    case "VET":
+        go conn.OnToggleVeto(txid, data)
+    case "CHALLENGE_REQUEST":
+        go conn.OnChallengeRequest(txid, data)
+    case "CHALLENGE_CANCEL":
+        go conn.OnChallengeCancel(txid, data)
+    case "CHALLENGE_ACCEPT":
+        go conn.OnChallengeAccept(txid, data)
+    case "CHALLENGE_DECLINE":
+        go conn.OnChallengeDecline(txid, data)
+    }
+
 }
 
 // Error codes:
@@ -458,1147 +459,1160 @@ func (conn *ClientConnection) read() {
 // 512 - Room not found.
 
 func (this *ClientConnection) Close() error {
-	switch this.conn.(type) {
-	case net.Conn:
-		conn := this.conn.(net.Conn)
-		return conn.Close()
-	case websocket.Conn:
-		conn := this.conn.(websocket.Conn)
-		return conn.Close()
-	}
+    switch this.conn.(type) {
+    case net.Conn:
+        conn := this.conn.(net.Conn)
+        return conn.Close()
+    case websocket.Conn:
+        conn := this.conn.(websocket.Conn)
+        return conn.Close()
+    }
 
-	return nil
+    return nil
 }
 
 func (conn *ClientConnection) OnToggleVeto(txid int, data []byte) {
-	if len(data) == 0 {
-		conn.SendError(ErrGeneric, txid)
-		return
-	}
+    if len(data) == 0 {
+        conn.SendError(ErrGeneric, txid)
+        return
+    }
 
-	var mapMessage protobufs.Map
-	err := Unmarshal(data, &mapMessage)
+    var mapMessage protobufs.Map
+    err := Unmarshal(data, &mapMessage)
 
-	if err != nil {
-		log.Println(err)
-		conn.SendError(ErrGeneric, txid)
-		return
-	}
+    if err != nil {
+        log.Println(err)
+        conn.SendError(ErrGeneric, txid)
+        return
+    }
 
-	mapObj := maps.GetId(BattleNetRegion(mapMessage.GetRegion()), int(mapMessage.GetBattleNetId()))
-	if mapObj == nil || !mapObj.InRankedPool {
-		conn.SendError(ErrLadderVetoNotInRankedPool, txid)
-		return
-	}
+    mapObj := maps.GetId(BattleNetRegion(mapMessage.GetRegion()), int(mapMessage.GetBattleNetId()))
+    if mapObj == nil || !mapObj.InRankedPool {
+        conn.SendError(ErrLadderVetoNotInRankedPool, txid)
+        return
+    }
 
-	vetoes, err := conn.client.Vetoes()
-	if err != nil {
-		log.Println(err)
-		conn.SendError(ErrDatabaseRead, txid)
-		return
-	}
-	existing := false
-	regionVetoes := int64(0)
-	for _, x := range vetoes {
-		if x.Region == mapObj.Region {
-			regionVetoes += 1
-		}
-		if x.Id == mapObj.Id {
-			existing = true
-		}
-	}
+    vetoes, err := conn.client.Vetoes()
+    if err != nil {
+        log.Println(err)
+        conn.SendError(ErrDatabaseRead, txid)
+        return
+    }
+    existing := false
+    regionVetoes := int64(0)
+    for _, x := range vetoes {
+        if x.Region == mapObj.Region {
+            regionVetoes += 1
+        }
+        if x.Id == mapObj.Id {
+            existing = true
+        }
+    }
 
-	if !existing {
-		if regionVetoes >= ladderMaxMapVetos {
-			conn.SendError(ErrLadderAllVetoesUsed, txid)
-			return
-		}
+    if !existing {
+        if regionVetoes >= ladderMaxMapVetos {
+            conn.SendError(ErrLadderAllVetoesUsed, txid)
+            return
+        }
 
-		var veto MapVeto
-		veto.ClientId = conn.client.Id
-		veto.MapId = mapObj.Id
-		err := dbMap.Insert(&veto)
-		if err != nil {
-			log.Println(err)
-			conn.SendError(ErrDatabaseWrite, txid)
-			return
-		}
-	} else {
-		_, err := dbMap.Exec("DELETE FROM map_vetoes WHERE ClientId=? and MapId=?", conn.client.Id, mapObj.Id)
-		if err != nil {
-			log.Println(err)
-			conn.SendError(ErrDatabaseWrite, txid)
-			return
-		}
-	}
+        var veto MapVeto
+        veto.ClientId = conn.client.Id
+        veto.MapId = mapObj.Id
+        err := dbMap.Insert(&veto)
+        if err != nil {
+            log.Println(err)
+            conn.SendError(ErrDatabaseWrite, txid)
+            return
+        }
+    } else {
+        _, err := dbMap.Exec("DELETE FROM map_vetoes WHERE ClientId=? and MapId=?", conn.client.Id, mapObj.Id)
+        if err != nil {
+            log.Println(err)
+            conn.SendError(ErrDatabaseWrite, txid)
+            return
+        }
+    }
 
-	clientLockouts.LockId(conn.client.Id)
-	delete(clientVetoes, conn.client.Id)
-	clientLockouts.UnlockId(conn.client.Id)
-	vetoes, err = conn.client.Vetoes()
+    clientLockouts.LockId(conn.client.Id)
+    delete(clientVetoes, conn.client.Id)
+    clientLockouts.UnlockId(conn.client.Id)
+    vetoes, err = conn.client.Vetoes()
 
-	mapPoolMessage := &protobufs.MapPool{
-		Map: make([]*protobufs.Map, 0, len(vetoes)),
-	}
+    mapPoolMessage := &protobufs.MapPool{
+        Map: make([]*protobufs.Map, 0, len(vetoes)),
+    }
 
-	for _, x := range vetoes {
-		mapPoolMessage.Map = append(mapPoolMessage.Map, x.MapMessage())
-	}
+    for _, x := range vetoes {
+        mapPoolMessage.Map = append(mapPoolMessage.Map, x.MapMessage())
+    }
 
-	data, err = Marshal(mapPoolMessage)
-	if err != nil {
-		log.Println(err)
-		conn.SendError(ErrGeneric, txid)
-		return
-	}
-	conn.SendResponseMessage("VET", txid, data)
-	return
+    data, err = Marshal(mapPoolMessage)
+    if err != nil {
+        log.Println(err)
+        conn.SendError(ErrGeneric, txid)
+        return
+    }
+    conn.SendResponseMessage("VET", txid, data)
+    return
 }
 
 func (conn *ClientConnection) OnLongProcessRequest(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    if conn.client.PendingMatchmakingId == nil || len(data) == 0 {
+        conn.logger.Println("Bad command", conn.client.PendingMatchmakingId, len(data))
+        conn.SendError(ErrLongProcessUnavailable, txid)
+        return
+    }
 
-	if conn.client.PendingMatchmakingId == nil || len(data) == 0 {
-		conn.logger.Println("Bad command", conn.client.PendingMatchmakingId, len(data))
-		conn.SendError(ErrLongProcessUnavailable, txid)
-		return
-	}
+    var process int = int(data[0])
 
-	var process int = int(data[0])
+    if process != MATCHMAKING_LONG_PROCESS_DRAW && process != MATCHMAKING_LONG_PROCESS_NOSHOW {
+        conn.logger.Println("Bad data")
+        conn.SendError(ErrLongProcessUnavailable, txid)
+        return
+    }
 
-	if process != MATCHMAKING_LONG_PROCESS_DRAW && process != MATCHMAKING_LONG_PROCESS_NOSHOW {
-		conn.logger.Println("Bad data")
-		conn.SendError(ErrLongProcessUnavailable, txid)
-		return
-	}
+    match := matchmaker.Match(*conn.client.PendingMatchmakingId)
+    if match == nil {
+        conn.logger.Println("Bad match")
+        conn.SendError(ErrLongProcessUnavailable, txid)
+        return
+    }
+    var opponent *Client = nil
+    if conn.client.PendingMatchmakingOpponentId != nil {
+        opponent = clientCache.Get(*conn.client.PendingMatchmakingOpponentId)
+    }
+    if opponent == nil || *opponent.PendingMatchmakingOpponentId != conn.client.Id {
+        conn.logger.Println("Mismatch. Ending match.")
+        conn.SendResponseMessage("RLP", txid, []byte{})
+        match.EndMatch()
+        return
+    }
 
-	match := matchmaker.Match(*conn.client.PendingMatchmakingId)
-	if match == nil {
-		conn.logger.Println("Bad match")
-		conn.SendError(ErrLongProcessUnavailable, txid)
-		return
-	}
-	var opponent *Client = nil
-	if conn.client.PendingMatchmakingOpponentId != nil {
-		opponent = clientCache.Get(*conn.client.PendingMatchmakingOpponentId)
-	}
-	if opponent == nil || *opponent.PendingMatchmakingOpponentId != conn.client.Id {
-		conn.logger.Println("Mismatch. Ending match.")
-		conn.SendResponseMessage("RLP", txid, []byte{})
-		match.EndMatch()
-		return
-	}
+    if !opponent.IsOnline() {
+        conn.SendResponseMessage("RLP", txid, []byte{})
+        if process == MATCHMAKING_LONG_PROCESS_DRAW {
+            match.EndMatch()
+        } else if process == MATCHMAKING_LONG_PROCESS_NOSHOW {
+            opponent.ForfeitMatchmadeMatch()
+        }
 
-	if !opponent.IsOnline() {
-		conn.SendResponseMessage("RLP", txid, []byte{})
-		if process == MATCHMAKING_LONG_PROCESS_DRAW {
-			match.EndMatch()
-		} else if process == MATCHMAKING_LONG_PROCESS_NOSHOW {
-			opponent.ForfeitMatchmadeMatch()
-		}
+        return
+    }
 
-		return
-	}
+    if !match.CanLongProcess() || !match.StartLongProcess(conn.client, process) {
+        conn.logger.Println("Failed to start")
+        conn.SendError(ErrLongProcessUnavailable, txid)
+        return
+    }
 
-	if !match.CanLongProcess() || !match.StartLongProcess(conn.client, process) {
-		conn.logger.Println("Failed to start")
-		conn.SendError(ErrLongProcessUnavailable, txid)
-		return
-	}
+    if process == MATCHMAKING_LONG_PROCESS_DRAW {
+        // Long process draw
+        opponent.Broadcast("LPD", nil)
+    } else if process == MATCHMAKING_LONG_PROCESS_NOSHOW {
+        // Long process forefeit
+        opponent.Broadcast("LPF", nil)
+    }
 
-	if process == MATCHMAKING_LONG_PROCESS_DRAW {
-		// Long process draw
-		opponent.Broadcast("LPD", nil)
-	} else if process == MATCHMAKING_LONG_PROCESS_NOSHOW {
-		// Long process forefeit
-		opponent.Broadcast("LPF", nil)
-	}
-
-	//Request Long Process
-	conn.SendResponseMessage("RLP", txid, []byte{})
+    //Request Long Process
+    conn.SendResponseMessage("RLP", txid, []byte{})
 }
 
 func (conn *ClientConnection) OnLongProcessResponse(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    if conn.client.PendingMatchmakingId == nil || len(data) == 0 {
+        conn.logger.Println("Bad command", conn.client.PendingMatchmakingId, len(data))
+        conn.SendError(ErrLongProcessUnavailable, txid)
+        return
+    }
 
-	if conn.client.PendingMatchmakingId == nil || len(data) == 0 {
-		conn.logger.Println("Bad command", conn.client.PendingMatchmakingId, len(data))
-		conn.SendError(ErrLongProcessUnavailable, txid)
-		return
-	}
+    log.Println(data)
+    var response bool = data[0] == '1'
 
-	log.Println(data)
-	var response bool = data[0] == '1'
+    match := matchmaker.Match(*conn.client.PendingMatchmakingId)
+    if match == nil {
+        conn.logger.Println("Bad match")
+        conn.SendError(ErrLongProcessUnavailable, txid)
+        return
+    }
 
-	match := matchmaker.Match(*conn.client.PendingMatchmakingId)
-	if match == nil {
-		conn.logger.Println("Bad match")
-		conn.SendError(ErrLongProcessUnavailable, txid)
-		return
-	}
+    if !match.longProcessActive {
+        conn.logger.Println("Long process not active")
+        conn.SendError(ErrLongProcessUnavailable, txid)
+        return
+    }
 
-	if !match.longProcessActive {
-		conn.logger.Println("Long process not active")
-		conn.SendError(ErrLongProcessUnavailable, txid)
-		return
-	}
+    if match.longProcessInitiator.Id == conn.client.Id {
+        conn.logger.Println("Response is from initiator", match.Id)
+        conn.SendError(ErrLongProcessUnavailable, txid)
+        return
+    }
 
-	if match.longProcessInitiator.Id == conn.client.Id {
-		conn.logger.Println("Response is from initiator", match.Id)
-		conn.SendError(ErrLongProcessUnavailable, txid)
-		return
-	}
+    go func() {
+        match.longProcessResponse <- response
+    }()
+    go func() {
+        if response {
+            // Long Process Accept
+            match.longProcessInitiator.Broadcast("LPA", nil)
+        } else {
+            // Long Process Reject
+            match.longProcessInitiator.Broadcast("LPR", nil)
+        }
+    }()
 
-	go func() {
-		match.longProcessResponse <- response
-	}()
-	go func() {
-		if response {
-			// Long Process Accept
-			match.longProcessInitiator.Broadcast("LPA", nil)
-		} else {
-			// Long Process Reject
-			match.longProcessInitiator.Broadcast("LPR", nil)
-		}
-	}()
-
-	// Long process response
-	conn.SendResponseMessage("LPR", txid, []byte{})
+    // Long process response
+    conn.SendResponseMessage("LPR", txid, []byte{})
 }
 
 func (conn *ClientConnection) OnChatJoin(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    if int64(len(conn.chatRooms)) >= maxChatRooms {
+        conn.SendError(ErrChatMaxChannelLimit, txid)
+        return
+    }
+    var join protobufs.ChatRoomRequest
+    err_marshal := Unmarshal(data, &join)
+    if err_marshal != nil {
+        conn.Close()
+    }
 
-	if int64(len(conn.chatRooms)) >= maxChatRooms {
-		conn.SendError(ErrChatMaxChannelLimit, txid)
-		return
-	}
-	var join protobufs.ChatRoomRequest
-	err_marshal := Unmarshal(data, &join)
-	if err_marshal != nil {
-		conn.Close()
-	}
+    key := cleanChatRoomName(join.GetRoom())
+    room, ok := chatRooms[key]
+    if ok {
+        if !room.joinable {
+            conn.SendError(ErrChatBadPassword, txid)
+            return
+        }
 
-	key := cleanChatRoomName(join.GetRoom())
-	room, ok := chatRooms[key]
-	if ok {
-		if !room.joinable {
-			conn.SendError(ErrChatBadPassword, txid)
-			return
-		}
+        if room.password != "" && room.password != join.GetPassword() {
+            conn.SendError(ErrChatBadPassword, txid)
+            return
+        }
 
-		if room.password != "" && room.password != join.GetPassword() {
-			conn.SendError(ErrChatBadPassword, txid)
-			return
-		}
+        info := room.ChatRoomInfoMessage(true)
+        data, _ := Marshal(info)
 
-		info := room.ChatRoomInfoMessage(true)
-		data, _ := Marshal(info)
+        conn.SendResponseMessage("UCJ", txid, data)
 
-		conn.SendResponseMessage("UCJ", txid, data)
+        room.join <- conn
+    } else {
+        room, err := NewChatRoom(join.GetRoom(), join.GetPassword(), true, false)
+        if err != nil {
+            conn.SendError(err, txid)
+            return
+        }
+        room.join <- conn
+        info := room.ChatRoomInfoMessage(true)
+        data, _ := Marshal(info)
 
-		room.join <- conn
-	} else {
-		room, err := NewChatRoom(join.GetRoom(), join.GetPassword(), true, false)
-		if err != nil {
-			conn.SendError(err, txid)
-			return
-		}
-		room.join <- conn
-		info := room.ChatRoomInfoMessage(true)
-		data, _ := Marshal(info)
-
-		conn.SendResponseMessage("UCJ", txid, data)
-	}
+        conn.SendResponseMessage("UCJ", txid, data)
+    }
 }
 func (conn *ClientConnection) OnChatLeave(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    var leave protobufs.ChatRoomRequest
+    err := Unmarshal(data, &leave)
+    if err != nil {
+        conn.logger.Println(err)
+        conn.Close()
+        return
+    }
+    key := cleanChatRoomName(leave.GetRoom())
+    room, ok := conn.chatRooms[key]
+    if ok {
+        room.leave <- conn
+    }
 
-	var leave protobufs.ChatRoomRequest
-	err := Unmarshal(data, &leave)
-	if err != nil {
-		conn.logger.Println(err)
-		conn.Close()
-		return
-	}
-	key := cleanChatRoomName(leave.GetRoom())
-	room, ok := conn.chatRooms[key]
-	if ok {
-		room.leave <- conn
-	}
-
-	conn.SendResponseMessage("UCL", txid, []byte{})
+    conn.SendResponseMessage("UCL", txid, []byte{})
 
 }
 
 func (conn *ClientConnection) OnPrivateMessage(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    var message protobufs.ChatMessage
+    err := Unmarshal(data, &message)
+    if err != nil {
+        conn.Close()
+    }
 
-	var message protobufs.ChatMessage
-	err := Unmarshal(data, &message)
-	if err != nil {
-		conn.Close()
-	}
+    text := strings.TrimSpace(message.GetMessage())
+    target := strings.ToLower(strings.TrimSpace(message.GetTarget()))
 
-	text := strings.TrimSpace(message.GetMessage())
-	target := strings.ToLower(strings.TrimSpace(message.GetTarget()))
+    if text == "" || target == "" {
+        conn.SendError(ErrChatMissingFields, txid)
+        return
+    }
 
-	if text == "" || target == "" {
-		conn.SendError(ErrChatMissingFields, txid)
-		return
-	}
+    var outMessage protobufs.ChatPrivateMessage
 
-	var outMessage protobufs.ChatPrivateMessage
+    stat := conn.client.UserStatsMessage()
 
-	stat := conn.client.UserStatsMessage()
+    outMessage.Sender = stat
+    outMessage.Message = &text
+    data, err = Marshal(&outMessage)
 
-	outMessage.Sender = stat
-	outMessage.Message = &text
-	data, err = Marshal(&outMessage)
+    if err != nil {
+        conn.SendError(ErrGeneric, txid)
+        return
+    }
 
-	if err != nil {
-		conn.SendError(ErrGeneric, txid)
-		return
-	}
+    sent := false
+    for _, _conn := range clientConnections.findClientsByName(target) {
+        go _conn.SendServerMessage("CHP", data)
+        sent = true
+    }
 
-	sent := false
-	for _, _conn := range findClientsByName(clientConnections, target) {
-		go _conn.SendServerMessage("CHP", data)
-			sent = true
-		}
-
-	if !sent {
-		conn.SendError(ErrChatUserOffline, txid)
-	} else {
-		conn.logger.Println("Send private message to", message.GetTarget(), ":", message.GetMessage())
-		conn.SendResponseMessage("UPM", txid, []byte{})
-	}
+    if !sent {
+        conn.SendError(ErrChatUserOffline, txid)
+    } else {
+        conn.logger.Println("Send private message to", message.GetTarget(), ":", message.GetMessage())
+        conn.SendResponseMessage("UPM", txid, []byte{})
+    }
 
 }
 
 func (conn *ClientConnection) OnChatMessage(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
-	now := time.Now()
-	difference := time.Now().Sub(conn.client.chatLastMessageTime)
-	switch {
-	case difference <= chatDelay:
-		conn.client.chatDelayScale *= 2
-	case difference > chatMaxThrottleTime:
-		conn.client.chatDelayScale = 1
-	}
+    now := time.Now()
+    difference := time.Now().Sub(conn.client.chatLastMessageTime)
+    switch {
+    case difference <= chatDelay:
+        conn.client.chatDelayScale *= 2
+    case difference > chatMaxThrottleTime:
+        conn.client.chatDelayScale = 1
+    }
 
-	sendtime := conn.client.chatLastMessageTime.Add(time.Duration(conn.client.chatDelayScale) * chatDelay)
-	if sendtime.After(now) {
-		conn.SendError(ErrChatRateLimit, txid)
-		return
-	}
+    sendtime := conn.client.chatLastMessageTime.Add(time.Duration(conn.client.chatDelayScale) * chatDelay)
+    if sendtime.After(now) {
+        conn.SendError(ErrChatRateLimit, txid)
+        return
+    }
 
-	conn.client.chatLastMessageTime = now
+    conn.client.chatLastMessageTime = now
 
-	var message protobufs.ChatMessage
-	err := Unmarshal(data, &message)
-	if err != nil {
-		conn.Close()
-	}
+    var message protobufs.ChatMessage
+    err := Unmarshal(data, &message)
+    if err != nil {
+        conn.Close()
+    }
 
-	if int64(len(message.GetMessage())) > chatMaxMessageLength {
-		conn.SendError(ErrChatMessageTooLong, txid)
-		return
-	}
+    if int64(len(message.GetMessage())) > chatMaxMessageLength {
+        conn.SendError(ErrChatMessageTooLong, txid)
+        return
+    }
 
-	key := cleanChatRoomName(message.GetTarget())
-	room, ok := conn.chatRooms[key]
-	if ok {
-		conn.logger.Println("Sent chat message to room", key, ":", message.GetMessage())
-		// room.SaveMessage(conn message)
-		msg := room.ChatRoomMessageMessage(conn, &message)
-		room.message <- &msg
-		conn.SendResponseMessage("UCM", txid, []byte{})
-	} else {
-		conn.SendError(ErrChatNotOnChannel, txid)
-	}
+    key := cleanChatRoomName(message.GetTarget())
+    room, ok := conn.chatRooms[key]
+    if ok {
+        conn.logger.Println("Sent chat message to room", key, ":", message.GetMessage())
+        // room.SaveMessage(conn message)
+        msg := room.ChatRoomMessageMessage(conn, &message)
+        room.message <- &msg
+        conn.SendResponseMessage("UCM", txid, []byte{})
+    } else {
+        conn.SendError(ErrChatNotOnChannel, txid)
+    }
 }
 func (conn *ClientConnection) OnChatIndex(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    // This process might be a bit intensive. Perhaps cache it?
+    var index protobufs.ChatRoomIndex
 
-	// This process might be a bit intensive. Perhaps cache it?
-	var index protobufs.ChatRoomIndex
+    var rooms []*ChatRoom = make([]*ChatRoom, len(joinableChatRooms))
 
-	var rooms []*ChatRoom = make([]*ChatRoom, len(joinableChatRooms))
+	log.Println("rooms: ", len(rooms))
 
-	i := 0
-	for x := range joinableChatRooms {
+    i := 0
+    for x := range joinableChatRooms {
 
-		rooms[i] = joinableChatRooms[x]
-		i++
-	}
+        rooms[i] = joinableChatRooms[x]
+        i++
+    }
 
 parent:
-	for x := range conn.chatRooms {
-		for y := range rooms {
-			if conn.chatRooms[x] == rooms[y] {
-				continue parent
-			}
-		}
+    for x := range conn.chatRooms {
+        for y := range rooms {
+            if conn.chatRooms[x] == rooms[y] {
+                continue parent
+            }
+        }
 
-		rooms = append(rooms, conn.chatRooms[x])
-	}
+        rooms = append(rooms, conn.chatRooms[x])
+    }
 
-	var infos []*protobufs.ChatRoomInfo = make([]*protobufs.ChatRoomInfo, len(rooms))
+    var infos []*protobufs.ChatRoomInfo = make([]*protobufs.ChatRoomInfo, len(rooms))
 
-	i = 0
-	for x := range rooms {
-		infos[i] = rooms[x].ChatRoomInfoMessage(false)
-		i++
-	}
+    i = 0
+    for x := range rooms {
+        infos[i] = rooms[x].ChatRoomInfoMessage(false)
+        i++
+    }
 
-	index.Room = infos
-	data, err := Marshal(&index)
-	if err == nil {
-		conn.SendResponseMessage("UCI", txid, data)
-	} else {
-		conn.SendError(ErrGeneric, txid)
-	}
+    index.Room = infos
+    data, err := Marshal(&index)
+    if err == nil {
+        conn.SendResponseMessage("UCI", txid, data)
+    } else {
+        conn.SendError(ErrGeneric, txid)
+    }
 }
 
 func (conn *ClientConnection) OnChatHistory(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    var messages protobufs.ChatHistoryMessages
+    var from protobufs.ChatRoomRequest
 
-	var messages protobufs.ChatHistoryMessages
-	var from protobufs.ChatRoomRequest
+    err := Unmarshal(data, &from)
+    room := conn.chatRooms[cleanChatRoomName(from.GetRoom())]
 
-	err := Unmarshal(data, &from)
-	room := conn.chatRooms[cleanChatRoomName(from.GetRoom())]
+    if room == nil {
+        conn.SendError(ErrChatRoomNotFound, txid)
+    } else {
+        messages.Message = room.messageCache
 
-	if room == nil {
-		conn.SendError(ErrChatRoomNotFound, txid)
-	} else {
-		messages.Message = room.messageCache
-
-		data, err = Marshal(&messages)
-		if err == nil {
-			conn.SendResponseMessage("UCH", txid, data)
-		} else {
-			conn.SendError(ErrGeneric, txid)
-		}
-	}
+        data, err = Marshal(&messages)
+        if err == nil {
+            conn.SendResponseMessage("UCH", txid, data)
+        } else {
+            conn.SendError(ErrGeneric, txid)
+        }
+    }
 }
 
 func (conn *ClientConnection) OnPong(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
-
-	conn.lastPong = time.Now()
-	conn.latency = conn.lastPong.Sub(conn.lastPing).Nanoseconds() / 1000000
-	if conn.lastPingChallenge == "" || string(data) != conn.lastPingChallenge {
-		conn.logger.Printf("Bad PNR response. Expected %s, got %v", conn.lastPingChallenge, data)
-		conn.Close()
-	} else {
-		conn.SendResponseMessage("PNR", txid, []byte{})
-	}
-	conn.lastPingChallenge = ""
+    conn.lastPong = time.Now()
+    conn.latency = conn.lastPong.Sub(conn.lastPing).Nanoseconds() / 1000000
+    if conn.lastPingChallenge == "" || string(data) != conn.lastPingChallenge {
+        conn.logger.Printf("Bad PNR response. Expected %s, got %v", conn.lastPingChallenge, data)
+        conn.Close()
+    } else {
+        conn.SendResponseMessage("PNR", txid, []byte{})
+    }
+    conn.lastPingChallenge = ""
 }
 
 func (conn *ClientConnection) OnReplay(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    file, err := ioutil.TempFile("", "erosreplay")
+    if err != nil {
+        conn.SendError(ErrDiskWrite, txid)
+        conn.logger.Println(err)
+        return
+    }
 
-	file, err := ioutil.TempFile("", "erosreplay")
-	if err != nil {
-		conn.SendError(ErrDiskWrite, txid)
-		conn.logger.Println(err)
-		return
-	}
+    defer file.Close()
 
-	defer file.Close()
+    _, err = file.Write(data)
+    if err != nil {
+        conn.SendError(ErrDiskWrite, txid)
+        conn.logger.Println(err)
+        os.Remove(file.Name())
+        return
+    }
 
-	_, err = file.Write(data)
-	if err != nil {
-		conn.SendError(ErrDiskWrite, txid)
-		conn.logger.Println(err)
-		os.Remove(file.Name())
-		return
-	}
+    file.Close()
 
-	file.Close()
+    replay, err := NewReplay(file.Name())
+    if err != nil {
+        conn.SendError(ErrLadderErrorProcesingReplay, txid)
+        conn.logger.Println(err)
+        os.Remove(file.Name())
+        return
+    }
 
-	replay, err := NewReplay(file.Name())
-	if err != nil {
-		conn.SendError(ErrLadderErrorProcesingReplay, txid)
-		conn.logger.Println(err)
-		os.Remove(file.Name())
-		return
-	}
+    result, players, eros_err := NewMatchResult(replay, conn.client)
+    if eros_err != nil {
+        conn.SendError(err, txid)
+        conn.logger.Println(err)
+        os.Remove(file.Name())
+        return
+    }
 
-	result, players, eros_err := NewMatchResult(replay, conn.client)
-	if eros_err != nil {
-		conn.SendError(err, txid)
-		conn.logger.Println(err)
-		os.Remove(file.Name())
-		return
-	}
+    if result == nil {
+        conn.SendError(ErrLadderErrorProcesingReplay, txid)
+        os.Remove(file.Name())
+        return
+    }
 
-	if result == nil {
-		conn.SendError(ErrLadderErrorProcesingReplay, txid)
-		os.Remove(file.Name())
-		return
-	}
+    if replayPath != "" {
+        newfile := path.Join(replayPath, fmt.Sprintf("%d.sc2replay", result.Id))
+        err = os.Rename(file.Name(), newfile)
+        if err == nil {
+            matchmaker.logger.Println("Replay uploaded by", conn.client.Username, "for match", result.Id, "saved to", newfile)
+        } else {
+            matchmaker.logger.Println("Failed to save replay uploaded by", conn.client.Username, "for match", result.Id, file.Name(), "->", newfile, err)
+            os.Remove(file.Name())
+        }
+    } else {
+        os.Remove(file.Name())
+    }
 
-	if replayPath != "" {
-		newfile := path.Join(replayPath, fmt.Sprintf("%d.sc2replay", result.Id))
-		err = os.Rename(file.Name(), newfile)
-		if err == nil {
-			matchmaker.logger.Println("Replay uploaded by", conn.client.Username, "for match", result.Id, "saved to", newfile)
-		} else {
-			matchmaker.logger.Println("Failed to save replay uploaded by", conn.client.Username, "for match", result.Id, file.Name(), "->", newfile, err)
-			os.Remove(file.Name())
-		}
-	} else {
-		os.Remove(file.Name())
-	}
+    message := result.MatchResultMessage(players)
 
-	message := result.MatchResultMessage(players)
+    data, _ = Marshal(message)
 
-	data, _ = Marshal(message)
-
-	conn.SendResponseMessage("REP", txid, data)
+    conn.SendResponseMessage("REP", txid, data)
 }
 
 func (conn *ClientConnection) OnAddCharacter(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    if len(data) == 0 {
+        conn.SendError(ErrBadCharacterInfo, txid)
+        return
+    }
 
-	if len(data) == 0 {
-		conn.SendError(ErrBadCharacterInfo, txid)
-		return
-	}
+    region, subregion, id, name := ParseBattleNetProfileUrl(string(data))
 
-	region, subregion, id, name := ParseBattleNetProfileUrl(string(data))
+    if region == BATTLENET_REGION_UNKNOWN {
+        conn.SendError(ErrBadCharacterInfo, txid)
+        return
+    }
 
-	if region == BATTLENET_REGION_UNKNOWN {
-		conn.SendError(ErrBadCharacterInfo, txid)
-		return
-	}
+    count, err := dbMap.SelectInt("SELECT COUNT(*) FROM battle_net_characters WHERE Region=? and SubRegion=? and ProfileId=? and Enabled=?", region, subregion, id, true)
+    if err != nil {
+        conn.SendError(ErrDatabaseRead, txid)
+        return
+    }
 
-	count, err := dbMap.SelectInt("SELECT COUNT(*) FROM battle_net_characters WHERE Region=? and SubRegion=? and ProfileId=? and Enabled=?", region, subregion, id, true)
-	if err != nil {
-		conn.SendError(ErrDatabaseRead, txid)
-		return
-	}
+    if count > 0 {
+        conn.SendError(ErrCharacterAlreadyExists, txid)
+        return
+    }
 
-	if count > 0 {
-		conn.SendError(ErrCharacterAlreadyExists, txid)
-		return
-	}
+    character := NewBattleNetCharacter(region, subregion, id, name)
+    character.ClientId = &conn.client.Id
+    character.IsVerified = testMode
+    err = character.SetVerificationPortrait()
 
-	character := NewBattleNetCharacter(region, subregion, id, name)
-	character.ClientId = &conn.client.Id
-	character.IsVerified = testMode
-	err = character.SetVerificationPortrait()
+    if err != nil {
+        conn.logger.Println(err)
+        conn.SendError(ErrCommunicatingWithBattleNet, txid)
+        return
+    }
 
-	if err != nil {
-		conn.logger.Println(err)
-		conn.SendError(ErrCommunicatingWithBattleNet, txid)
-		return
-	}
+    count, err = dbMap.SelectInt("SELECT COUNT(*) FROM battle_net_characters WHERE Region=? and SubRegion=? and ProfileId=? and Enabled=?", region, subregion, id, false)
+    if err != nil {
+        conn.SendError(ErrDatabaseRead, txid)
+        return
+    }
 
-	count, err = dbMap.SelectInt("SELECT COUNT(*) FROM battle_net_characters WHERE Region=? and SubRegion=? and ProfileId=? and Enabled=?", region, subregion, id, false)
-	if err != nil {
-		conn.SendError(ErrDatabaseRead, txid)
-		return
-	}
+    if count > 0 {
+        conn.logger.Println("Reenabling character.")
+        _, err = dbMap.Exec("UPDATE battle_net_characters SET Enabled=?, IsVerified=?, CharacterName=?, ClientId=? WHERE Region=? and SubRegion=? and ProfileId=?",
+            true, testMode, name, conn.client.Id, region, subregion, id)
+    } else {
+        err = dbMap.Insert(character)
+    }
+    if err != nil {
+        conn.SendError(ErrDatabaseWrite, txid)
+        log.Println("Error inserting or reenabling character", err)
+        return
+    }
 
-	if count > 0 {
-		conn.logger.Println("Reenabling character.")
-		_, err = dbMap.Exec("UPDATE battle_net_characters SET Enabled=?, IsVerified=?, CharacterName=?, ClientId=? WHERE Region=? and SubRegion=? and ProfileId=?",
-			true, testMode, name, conn.client.Id, region, subregion, id)
-	} else {
-		err = dbMap.Insert(character)
-	}
-	if err != nil {
-		conn.SendError(ErrDatabaseWrite, txid)
-		log.Println("Error inserting or reenabling character", err)
-		return
-	}
+    // This should be its own function
+    characterCache.Lock()
+    characterCache.characterIds[character.Id] = character
+    characterCache.profileIds[character.ProfileIdString()] = character
+    characterCache.Unlock()
 
-	// This should be its own function
-	characterCache.Lock()
-	characterCache.characterIds[character.Id] = character
-	characterCache.profileIds[character.ProfileIdString()] = character
-	characterCache.Unlock()
+    delete(clientCharacters, conn.client.Id)
 
-	delete(clientCharacters, conn.client.Id)
-
-	payload := character.CharacterMessage()
-	data, _ = Marshal(payload)
-	conn.SendResponseMessage("BNA", txid, data)
+    payload := character.CharacterMessage()
+    data, _ = Marshal(payload)
+    conn.SendResponseMessage("BNA", txid, data)
 }
 
 func (conn *ClientConnection) OnAuthCharacter(txid int, data []byte) {
-	var (
-		state string
-		url   string
-	)
+    var (
+        state string
+        url   string
+    )
 
-	defer conn.panicRecovery(txid)
+    if len(data) == 0 {
+        conn.SendErrorWithCustomMessage(ErrBadCharacterInfo, txid, "Payload too short")
+        return
+    }
 
-	if len(data) == 0 {
-		conn.SendErrorWithCustomMessage(ErrBadCharacterInfo, txid, "Payload too short")
-		return
-	}
+    var request protobufs.OAuthRequest
+    err := Unmarshal(data, &request)
 
-	var request protobufs.OAuthRequest
-	err := Unmarshal(data, &request)
+    if err != nil {
+        conn.SendErrorWithCustomMessage(ErrBadCharacterInfo, txid, "Error unmarshalling payload")
+        return
+    }
 
-	if err != nil {
-		conn.SendErrorWithCustomMessage(ErrBadCharacterInfo, txid, "Error unmarshalling payload")
-		return
-	}
+    conn.logger.Println("Asked from region", request.GetRegion())
 
-	conn.logger.Println("Asked from region", request.GetRegion())
+    region := BattleNetRegion(request.GetRegion())
 
-	region := BattleNetRegion(request.GetRegion())
+    oauth_request := OAuthRequest{region: region, conn: conn}
 
-	oauth_request := OAuthRequest{region: region, conn: conn}
+    // Make sure the state is unique in the active requests
+    for exists := true; exists; _, exists = activeOAuths[state] {
+        url, state = oauth_request.RequestPermission()
+    }
 
-	// Make sure the state is unique in the active requests
-	for exists := true; exists; _, exists = activeOAuths[state] {
-		url, state = oauth_request.RequestPermission()
-	}
+    activeOAuths[oauth_request.state] = oauth_request
 
-	activeOAuths[oauth_request.state] = oauth_request
+    // Cleanup after a given time
+    timer := time.NewTimer(time.Minute * time.Duration(oauthCodeTimeout))
+    go func() {
+        <-timer.C
+        delete(activeOAuths, oauth_request.state)
+    }()
 
-	// Cleanup after a given time
-	timer := time.NewTimer(time.Minute * time.Duration(oauthCodeTimeout))
-	go func() {
-		<-timer.C
-		delete(activeOAuths, oauth_request.state)
-	}()
-
-	var payload protobufs.OAuthUrl
-	payload.Url = &url
-	data, _ = Marshal(&payload)
-	conn.SendResponseMessage("BNN", txid, data)
+    var payload protobufs.OAuthUrl
+    payload.Url = &url
+    data, _ = Marshal(&payload)
+    conn.SendResponseMessage("BNN", txid, data)
 }
 
 func (conn *ClientConnection) OnUpdateCharacter(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    if len(data) == 0 {
+        conn.SendError(ErrBadCharacterInfo, txid)
+        return
+    }
 
-	if len(data) == 0 {
-		conn.SendError(ErrBadCharacterInfo, txid)
-		return
-	}
+    var character_message protobufs.Character
 
-	var character_message protobufs.Character
+    err := Unmarshal(data, &character_message)
 
-	err := Unmarshal(data, &character_message)
+    if err != nil {
+        conn.SendError(ErrBadCharacterInfo, txid)
+        return
+    }
 
-	if err != nil {
-		conn.SendError(ErrBadCharacterInfo, txid)
-		return
-	}
+    character := characterCache.Get(BattleNetRegion(character_message.GetRegion()), int(character_message.GetSubregion()), int(character_message.GetProfileId()))
+    if character == nil {
+        conn.SendError(ErrBadCharacterInfo, txid)
+        return
+    }
 
-	character := characterCache.Get(BattleNetRegion(character_message.GetRegion()), int(character_message.GetSubregion()), int(character_message.GetProfileId()))
-	if character == nil {
-		conn.SendError(ErrBadCharacterInfo, txid)
-		return
-	}
+    if character.ClientId == nil || *character.ClientId != conn.client.Id {
+        conn.SendError(ErrBadCharacterInfo, txid)
+        return
+    }
 
-	if character.ClientId == nil || *character.ClientId != conn.client.Id {
-		conn.SendError(ErrBadCharacterInfo, txid)
-		return
-	}
+    updated := false
+    if !character.IsVerified {
+        ok, err := character.CheckVerificationPortrait()
+        if err != nil {
+            conn.logger.Println(err)
+            conn.SendError(ErrCommunicatingWithBattleNet, txid)
+            return
+        }
 
-	updated := false
-	if !character.IsVerified {
-		ok, err := character.CheckVerificationPortrait()
-		if err != nil {
-			conn.logger.Println(err)
-			conn.SendError(ErrCommunicatingWithBattleNet, txid)
-			return
-		}
+        if !ok {
+            conn.SendError(ErrVerificationFailed, txid)
+            return
+        } else {
+            character.IsVerified = true
+            updated = true
+        }
+    }
 
-		if !ok {
-			conn.SendError(ErrVerificationFailed, txid)
-			return
-		} else {
-			character.IsVerified = true
-			updated = true
-		}
-	}
+    if character_message.GetIngameProfileLink() != "" && character.InGameProfileLink != character_message.GetIngameProfileLink() {
+        if inGameProfileRegex.MatchString(character_message.GetIngameProfileLink()) {
+            character.InGameProfileLink = character_message.GetIngameProfileLink()
+            updated = true
+        }
+    }
 
-	if character_message.GetIngameProfileLink() != "" && character.InGameProfileLink != character_message.GetIngameProfileLink() {
-		if inGameProfileRegex.MatchString(character_message.GetIngameProfileLink()) {
-			character.InGameProfileLink = character_message.GetIngameProfileLink()
-			updated = true
-		}
-	}
+    if character_message.GetCharacterCode() != 0 && character.CharacterCode != int(character_message.GetCharacterCode()) {
+        character.CharacterCode = int(character_message.GetCharacterCode())
+        updated = true
+    }
 
-	if character_message.GetCharacterCode() != 0 && character.CharacterCode != int(character_message.GetCharacterCode()) {
-		character.CharacterCode = int(character_message.GetCharacterCode())
-		updated = true
-	}
+    if updated {
+        _, err = dbMap.Update(character)
+        if err != nil {
+            conn.SendError(ErrDatabaseWrite, txid)
+            conn.logger.Println(err)
+            return
+        }
+    }
 
-	if updated {
-		_, err = dbMap.Update(character)
-		if err != nil {
-			conn.SendError(ErrDatabaseWrite, txid)
-			conn.logger.Println(err)
-			return
-		}
-	}
-
-	payload := character.CharacterMessage()
-	data, _ = Marshal(payload)
-	conn.SendResponseMessage("BNU", txid, data)
+    payload := character.CharacterMessage()
+    data, _ = Marshal(payload)
+    conn.SendResponseMessage("BNU", txid, data)
 }
 
 func (conn *ClientConnection) OnRemoveCharacter(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    // Preventing removing characters while we're matched.
+    if conn.client.PendingMatchmakingId != nil {
+        conn.SendError(ErrCannotWhileMatched, txid)
+        return
+    }
 
-	// Preventing removing characters while we're matched.
-	if conn.client.PendingMatchmakingId != nil {
-		conn.SendError(ErrCannotWhileMatched, txid)
-		return
-	}
+    if len(data) == 0 {
+        conn.SendError(ErrBadCharacterInfo, txid)
+        return
+    }
 
-	if len(data) == 0 {
-		conn.SendError(ErrBadCharacterInfo, txid)
-		return
-	}
+    var character_message protobufs.Character
 
-	var character_message protobufs.Character
+    err := Unmarshal(data, &character_message)
 
-	err := Unmarshal(data, &character_message)
+    if err != nil {
+        conn.SendError(ErrBadCharacterInfo, txid)
+        return
+    }
 
-	if err != nil {
-		conn.SendError(ErrBadCharacterInfo, txid)
-		return
-	}
+    character := characterCache.Get(BattleNetRegion(character_message.GetRegion()), int(character_message.GetSubregion()), int(character_message.GetProfileId()))
+    if character == nil {
+        conn.SendError(ErrBadCharacterInfo, txid)
+        return
+    }
 
-	character := characterCache.Get(BattleNetRegion(character_message.GetRegion()), int(character_message.GetSubregion()), int(character_message.GetProfileId()))
-	if character == nil {
-		conn.SendError(ErrBadCharacterInfo, txid)
-		return
-	}
+    if character.ClientId == nil || *character.ClientId != conn.client.Id {
+        conn.SendError(ErrBadCharacterInfo, txid)
+        return
+    }
 
-	if character.ClientId == nil || *character.ClientId != conn.client.Id {
-		conn.SendError(ErrBadCharacterInfo, txid)
-		return
-	}
+    // _, err = dbMap.Delete(character)
+    character.Enabled = false
+    // _, err = dbMap.Update(character)
+    _, err = dbMap.Exec("UPDATE battle_net_characters SET Enabled=? WHERE Region=? and SubRegion=? and ProfileId=?", false, BattleNetRegion(character_message.GetRegion()), int(character_message.GetSubregion()), int(character_message.GetProfileId()))
+    if err != nil {
+        conn.SendError(ErrDatabaseWrite, txid)
+        conn.logger.Println(err)
+        return
+    }
 
-	// _, err = dbMap.Delete(character)
-	character.Enabled = false
-	// _, err = dbMap.Update(character)
-	_, err = dbMap.Exec("UPDATE battle_net_characters SET Enabled=? WHERE Region=? and SubRegion=? and ProfileId=?", false, BattleNetRegion(character_message.GetRegion()), int(character_message.GetSubregion()), int(character_message.GetProfileId()))
-	if err != nil {
-		conn.SendError(ErrDatabaseWrite, txid)
-		conn.logger.Println(err)
-		return
-	}
+    delete(clientCharacters, conn.client.Id)
 
-	delete(clientCharacters, conn.client.Id)
-
-	conn.SendResponseMessage("BNR", txid, []byte{})
+    conn.SendResponseMessage("BNR", txid, []byte{})
 }
 
-func (conn *ClientConnection) handleMatchmakingResult(txid int, match *MatchmakerMatch, opponent *Client, selectedMap *Map, elapsed int64) {
+func (conn *ClientConnection) SendMatchInfo(txid int, match *MatchmakerMatch, opponent *Client, selectedMap *Map, elapsed int64) {
 
-	var res protobufs.MatchmakingResult
-	opponentStats := opponent.UserStatsMessage()
-	mapInfo := selectedMap.MapMessage()
+    var res protobufs.MatchmakingResult
+    opponentStats := opponent.UserStatsMessage()
+    mapInfo := selectedMap.MapMessage()
 
-	res.Channel = &match.Channel
-	res.ChatRoom = &match.ChatRoom
-	res.Timespan = &elapsed
-	res.Quality = &match.Quality
-	res.Opponent = opponentStats
-	res.Map = mapInfo
-	res.LongUnlockTime = &matchmakingLongProcessUnlockTime
-	res.LongResponseTime = &matchmakingLongProcessResponseTime
+    res.Channel = &match.Channel
+    res.ChatRoom = &match.ChatRoom
+    res.Timespan = &elapsed
+    res.Quality = &match.Quality
+    res.Opponent = opponentStats
+    res.Map = mapInfo
+    res.LongUnlockTime = &matchmakingLongProcessUnlockTime
+    res.LongResponseTime = &matchmakingLongProcessResponseTime
 
-	data, _ := Marshal(&res)
-	if txid > 0 {
-		conn.SendResponseMessage("MMR", txid, data)
-	} else {
-		conn.SendServerMessage("MMR", data)
-	}
+    data, _ := Marshal(&res)
+    if txid > 0 {
+        conn.SendResponseMessage("MMR", txid, data)
+    } else {
+        conn.SendServerMessage("MMR", data)
+    }
 
-	room := GetChatRoom(match.ChatRoom, "", false, false)
-	if room != nil {
-		room.join <- conn
-	}
+    room := GetChatRoom(match.ChatRoom, "", false, false)
+    if room != nil {
+        room.join <- conn
+    }
 }
 
 func (conn *ClientConnection) handlePendingMatchmaking(txid int) bool {
-	if conn.client.PendingMatchmakingId != nil {
-		match := matchmaker.Match(*conn.client.PendingMatchmakingId)
+    if conn.client.PendingMatchmakingId != nil {
+        match := matchmaker.Match(*conn.client.PendingMatchmakingId)
 
-		if match != nil {
-			var opponent *Client = nil
-			if conn.client.PendingMatchmakingOpponentId != nil {
-				opponent = clientCache.Get(*conn.client.PendingMatchmakingOpponentId)
-			}
-			if opponent != nil {
-				if opponent.PendingMatchmakingId == conn.client.PendingMatchmakingId {
-					since := time.Now().Unix() - match.AddTime
+        if match != nil {
+            var opponent *Client = nil
+            if conn.client.PendingMatchmakingOpponentId != nil {
+                opponent = clientCache.Get(*conn.client.PendingMatchmakingOpponentId)
+            }
+            if opponent != nil {
+                if opponent.PendingMatchmakingId == conn.client.PendingMatchmakingId {
+                    since := time.Now().Unix() - match.AddTime
 
-					if since >= matchmakingMatchTimeout && matchmakingMatchTimeout != 0 {
-						// Match has expired. End it.
-						if opponent != nil {
-							matchmaker.logger.Println("Cleaning up old match between", conn.client.Username, opponent.Username)
+                    if since >= matchmakingMatchTimeout && matchmakingMatchTimeout != 0 {
+                        // Match has expired. End it.
+                        if opponent != nil {
+                            matchmaker.logger.Println("Cleaning up old match between", conn.client.Username, opponent.Username)
 
-						} else {
-							matchmaker.logger.Println("Cleaning up old match for", conn.client.Username)
+                        } else {
+                            matchmaker.logger.Println("Cleaning up old match for", conn.client.Username)
 
-						}
-						matchmaker.EndMatch(*conn.client.PendingMatchmakingId)
-					} else {
-						// Match is active. Send the old result.
-						selectedMap := maps[*match.MapId]
-						conn.handleMatchmakingResult(txid, match, opponent, selectedMap, 0)
-						return true
-					}
-				}
-			}
-		}
-	}
+                        }
+                        matchmaker.EndMatch(*conn.client.PendingMatchmakingId)
+                    } else {
+                        // Match is active. Send the old result.
+                        selectedMap := maps[*match.MapId]
+                        conn.SendMatchInfo(txid, match, opponent, selectedMap, 0)
+                        return true
+                    }
+                }
+            }
+        }
+    }
 
-	return false
+    return false
 }
 
 func (conn *ClientConnection) OnQueueMatchmaking(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+	log.Println("OnQueueMatchmaking", txid)
+    _, ok := matchmaker.participants[conn]
+    if !ok {
 
-	_, ok := matchmaker.participants[conn]
-	if !ok {
+        var queue protobufs.MatchmakingQueue
+        err := Unmarshal(data, &queue)
+        if err != nil {
+            conn.logger.Println(err)
+        }
 
-		var queue protobufs.MatchmakingQueue
-		err := Unmarshal(data, &queue)
-		if err != nil {
-			conn.logger.Println(err)
-		}
+        // We're storing the search regions in one field using bit shifting.
+        conn.client.LadderSearchRegions = make([]BattleNetRegion, 0, len(queue.GetRegion()))
 
-		// We're storing the search regions in one field using bit shifting.
-		conn.client.LadderSearchRegions = make([]BattleNetRegion, 0, len(queue.GetRegion()))
+        for _, region := range queue.GetRegion() {
+            if !conn.client.HasRegion(BattleNetRegion(region)) {
+                conn.SendError(ErrNoCharacterInRegion, txid)
+                return
+            }
+            conn.client.LadderSearchRegions = append(conn.client.LadderSearchRegions, BattleNetRegion(region))
+        }
 
-		for _, region := range queue.GetRegion() {
-			if !conn.client.HasRegion(BattleNetRegion(region)) {
-				conn.SendError(ErrNoCharacterInRegion, txid)
-				return
-			}
-			conn.client.LadderSearchRegions = append(conn.client.LadderSearchRegions, BattleNetRegion(region))
-		}
+        if len(conn.client.LadderSearchRegions) == 0 {
+            conn.SendError(ErrNoCharacterInRegion, txid)
+            return
+        }
+        conn.client.LadderSearchRadius = queue.GetRadius()
 
-		if len(conn.client.LadderSearchRegions) == 0 {
-			conn.SendError(ErrNoCharacterInRegion, txid)
-			return
-		}
-		conn.client.LadderSearchRadius = queue.GetRadius()
+        if conn.client.LadderSearchRadius < 0 {
+            conn.client.LadderSearchRadius = 0
+        }
 
-		if conn.client.LadderSearchRadius < 0 {
-			conn.client.LadderSearchRadius = 0
-		}
+        // Resume pending matches
+        if conn.handlePendingMatchmaking(txid) {
+            return
+        }
 
-		// Resume pending matches
-		if conn.handlePendingMatchmaking(txid) {
-			return
-		}
+        matchmaker.register <- conn
+        //We need to wait until the matchmaker has actually finished adding
+        //our new participant, otherwise our lookup would fail.
+        <-matchmaker.callback
+        el := matchmaker.participants[conn]
+        go func() {
+            select {
+            case <-el.abort:
+                // We've been cancelled somewhere. Abort out.
+                conn.SendError(ErrMatchmakingRequestCancelled, txid)
+                return
+            case match := <-el.match:
+                opponent := el.opponent
+                // We have an opponent! Great success.
 
-		matchmaker.register <- conn
-		//We need to wait until the matchmaker has actually finished adding
-		//our new participant, otherwise our lookup would fail.
-		<-matchmaker.callback
-		el := matchmaker.participants[conn]
-		go func() {
-			select {
-			case <-el.abort:
-				// We've been cancelled somewhere. Abort out.
-				conn.SendError(ErrMatchmakingRequestCancelled, txid)
-				return
-			case match := <-el.match:
-				opponent := el.opponent
-				// We have an opponent! Great success.
+                conn.client.PendingMatchmakingId = &match.Id
+                conn.client.PendingMatchmakingOpponentId = &opponent.client.Id
+                conn.client.PendingMatchmakingRegion = int64(match.Region)
 
-				conn.client.PendingMatchmakingId = &match.Id
-				conn.client.PendingMatchmakingOpponentId = &opponent.client.Id
-				conn.client.PendingMatchmakingRegion = int64(match.Region)
+                dbMap.Update(conn.client)
 
-				dbMap.Update(conn.client)
+                conn.SendMatchInfo(txid, match, opponent.client, el.selectedMap, int64(time.Since(el.enrollTime).Seconds()))
+            }
+        }()
+        conn.SendResponseMessage("MMQ", txid, []byte{})
 
-				conn.handleMatchmakingResult(txid, match, opponent.client, el.selectedMap, int64(time.Since(el.enrollTime).Seconds()))
-			}
-		}()
-		conn.SendResponseMessage("MMQ", txid, []byte{})
-
-	}
+    }
 
 }
 
 func (conn *ClientConnection) OnDequeueMatchmaking(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
-
-	el, ok := matchmaker.participants[conn]
-	if ok {
-		go func() {
-			matchmaker.unregister <- conn
-			el.abort <- true
-		}()
-	}
-	conn.SendResponseMessage("MMD", txid, []byte{})
+    el, ok := matchmaker.participants[conn]
+    if ok {
+        go func() {
+            matchmaker.unregister <- conn
+            el.abort <- true
+        }()
+    }
+    conn.SendResponseMessage("MMD", txid, []byte{})
 }
 
 func (conn *ClientConnection) OnForfeitMatchmaking(txid int, data []byte) {
-	defer conn.panicRecovery(txid)
+    if conn.client.PendingMatchmakingId != nil {
+        match := matchmaker.Match(*conn.client.PendingMatchmakingId)
+        if match != nil {
+            //result, players, err :=
+            match.CreateForfeit(conn.client)
+        }
 
-	if conn.client.PendingMatchmakingId != nil {
-		match := matchmaker.Match(*conn.client.PendingMatchmakingId)
-		if match != nil {
-			//result, players, err :=
-			match.CreateForfeit(conn.client)
-		}
-
-	}
-	conn.SendResponseMessage("MMF", txid, []byte{})
+    }
+    conn.SendResponseMessage("MMF", txid, []byte{})
 }
 
 func (conn *ClientConnection) OnSimulation(txid int, data []byte) {
-	if !allowsimulations {
-		conn.SendError(ErrAuthentication, txid)
-		return
-	}
-	// This is a sqlite query. Wont work elsewhere.
-	row, err := dbMap.Select(&Client{}, "SELECT * FROM clients WHERE id != ? ORDER BY RANDOM() LIMIT 1;", conn.client.Id)
+    if !allowsimulations {
+        conn.SendError(ErrAuthentication, txid)
+        return
+    }
+    // This is a sqlite query. Wont work elsewhere.
+    row, err := dbMap.Select(&Client{}, "SELECT * FROM clients WHERE id != ? ORDER BY RANDOM() LIMIT 1;", conn.client.Id)
 
-	if len(row) == 0 {
-		conn.SendError(ErrDatabaseRead, txid)
-		return
-	}
-	client := (row[0]).(*Client)
-	if len(data) == 0 {
-		conn.SendError(ErrGeneric, txid)
-		return
-	}
-	if err == nil {
-		var victor int = rand.Intn(2)
-		var region BattleNetRegion = BattleNetRegion(data[0])
+    if len(row) == 0 {
+        conn.SendError(ErrDatabaseRead, txid)
+        return
+    }
+    client := (row[0]).(*Client)
+    if len(data) == 0 {
+        conn.SendError(ErrGeneric, txid)
+        return
+    }
+    if err == nil {
+        var victor int = rand.Intn(2)
+        var region BattleNetRegion = BattleNetRegion(data[0])
 
-		if len(data) == 2 {
-			if data[1] == 'w' {
-				victor = 0
-			} else if data[1] == 'l' {
-				victor = 1
-			}
-		}
+        if len(data) == 2 {
+            if data[1] == 'w' {
+                victor = 0
+            } else if data[1] == 'l' {
+                victor = 1
+            }
+        }
 
-		var (
-			res           protobufs.SimulationResult
-			opponentStats *protobufs.UserStats = client.UserStatsMessage()
-			winner        *Client
-			loser         *Client
-			victory       bool
-		)
+        var (
+            res           protobufs.SimulationResult
+            opponentStats *protobufs.UserStats = client.UserStatsMessage()
+            winner        *Client
+            loser         *Client
+            victory       bool
+        )
 
-		if victor == 0 {
-			winner = conn.client
-			loser = client
-			victory = true
-		} else {
-			winner = client
-			loser = conn.client
-			victory = false
-		}
-		quality := winner.Defeat(loser, region)
+        if victor == 0 {
+            winner = conn.client
+            loser = client
+            victory = true
+        } else {
+            winner = client
+            loser = conn.client
+            victory = false
+        }
+        quality := winner.Defeat(loser, region)
 
-		res.Victory = &victory
-		res.Opponent = opponentStats
-		res.MatchQuality = &quality
+        res.Victory = &victory
+        res.Opponent = opponentStats
+        res.MatchQuality = &quality
 
-		dbMap.Update(winner, loser)
+        dbMap.Update(winner, loser)
 
-		data, _ := Marshal(&res)
-		conn.SendResponseMessage("SIM", txid, data)
+        data, _ := Marshal(&res)
+        conn.SendResponseMessage("SIM", txid, data)
 
-		conn.SendMarshalledServerMessage("USU", txid, conn.client.UserStatsMessage())
-	}
+        conn.SendMarshalledServerMessage("USU", txid, conn.client.UserStatsMessage())
+    }
 }
 
 func (conn *ClientConnection) OnHandshake(txid int, data []byte) bool {
-	defer conn.panicRecovery(txid)
+    var status protobufs.HandshakeResponse_HandshakeStatus = protobufs.HandshakeResponse_FAIL
+    var resp protobufs.HandshakeResponse
+    defer func() {
 
-	var status protobufs.HandshakeResponse_HandshakeStatus = protobufs.HandshakeResponse_FAIL
-	var resp protobufs.HandshakeResponse
-	defer func() {
+        resp.Status = &status
 
-		resp.Status = &status
+        data, err := Marshal(&resp)
+        if err == nil {
+            conn.SendResponseMessage("HSH", txid, data)
+        } else {
+            log.Println(err)
+        }
+    }()
 
-		data, err := Marshal(&resp)
-		if err == nil {
-			conn.SendResponseMessage("HSH", txid, data)
-		} else {
-			log.Println(err)
-		}
-	}()
+    var hs protobufs.Handshake
+    err := Unmarshal(data, &hs)
+    if err != nil {
+        conn.logger.Println(err)
+        return false
+    }
 
-	var hs protobufs.Handshake
-	err := Unmarshal(data, &hs)
-	if err != nil {
-		conn.logger.Println(err)
-		return false
+    var client *Client
+
+    realUser := GetRealUser(hs.GetUsername(), hs.GetAuthKey())
+
+    if realUser == nil {
+        conn.logger.Println("bad auth", hs.GetUsername(), hs.GetAuthKey())
+        return false
+    }
+
+    client = clientCache.Get(realUser.Id)
+
+    if client == nil {
+        client = NewClient(realUser.Id)
+
+        err := dbMap.Insert(client)
+        clientCache.clients[client.Id] = client
+        client.Username = realUser.Username
+
+        dbMap.Update(client)
+
+        conn.logger.Printf("New client %+v %+v", *client, err)
+    }
+    if _, ok := activeClients[client.Id]; ok {
+        status = protobufs.HandshakeResponse_ALREADY_LOGGED_IN
+        return false
+    }
+    activeClients[client.Id] = conn
+    log.Println("client:", client.Id, client.Username)
+    conn.logger.Printf("Client %+v", *client)
+    conn.client = client
+
+    var user *protobufs.UserStats = client.UserStatsMessage()
+
+    characters, err := client.Characters()
+
+    if err == nil {
+        var characterMessages []*protobufs.Character = make([]*protobufs.Character, len(characters))
+
+        for x := range characters {
+            characterMessages[x] = characters[x].CharacterMessage()
+        }
+
+        resp.Character = characterMessages
+    }
+
+    resp.User = user
+    resp.Id = &client.Id
+    resp.Division = make([]*protobufs.Division, 0, len(divisions))
+    resp.ActiveRegion = make([]protobufs.Region, 0, len(ladderActiveRegions))
+    resp.MapPool = maps.MapPoolMessage()
+
+    for x := range divisions {
+        resp.Division = append(resp.Division, divisions[x].DivisionMessage())
+    }
+    for _, region := range ladderActiveRegions {
+        resp.ActiveRegion = append(resp.ActiveRegion, protobufs.Region(region))
+    }
+    resp.MaxVetoes = &ladderMaxMapVetos
+    status = protobufs.HandshakeResponse_SUCCESS
+
+    return true
+}
+
+func (conn *ClientConnection) OnChallengeRequest(txid int, data []byte) {
+    var challenge protobufs.Challenge
+
+    err := Unmarshal(data, &challenge)
+    if err != nil {
+        conn.SendError(err, txid)
+        return
+    }
+
+    // Inform the matchmaker.
+    target := challenge.GetChallengee()
+	found := clientConnections.findClientsByName(target)
+	if len(found) == 0 {
+		conn.SendErrorWithCustomMessage(ErrGeneric, txid, "Failed to find client w/ username " + target)
+		return
 	}
+    matchmaker.challenge <- &Challenge{
+        initiator: conn,
+        target:    found[0],
+    }
 
-	var client *Client
+    // Inform the client that they've been challenged.
+    outMessage := protobufs.ChallengeRequested {
+        Challenger: conn.client.UserStatsMessage(),
+    }
 
-	realUser := GetRealUser(hs.GetUsername(), hs.GetAuthKey())
+    clients := clientConnections.findClientsByName(target)
+    for _, _client := range clients {
+        go _client.SendMarshalledServerMessage("CHALLENGED", txid, &outMessage)
+    }
+    return
+}
 
-	if realUser == nil {
-		conn.logger.Println("bad auth", hs.GetUsername(), hs.GetAuthKey())
-		return false
-	}
+func (conn *ClientConnection) OnChallengeCancel(txid int, data[]byte) {
+    return
+}
 
-	client = clientCache.Get(realUser.Id)
+func (conn *ClientConnection) OnChallengeAccept(txid int, data[]byte) {
+    return
+}
 
-	if client == nil {
-		client = NewClient(realUser.Id)
-
-		err := dbMap.Insert(client)
-		clientCache.clients[client.Id] = client
-		client.Username = realUser.Username
-
-		dbMap.Update(client)
-
-		conn.logger.Printf("New client %+v %+v", *client, err)
-	}
-	if _, ok := activeClients[client.Id]; ok {
-		status = protobufs.HandshakeResponse_ALREADY_LOGGED_IN
-		return false
-	}
-	activeClients[client.Id] = conn
-	log.Println("client:", client.Id, client.Username)
-	conn.logger.Printf("Client %+v", *client)
-	conn.client = client
-
-	var user *protobufs.UserStats = client.UserStatsMessage()
-
-	characters, err := client.Characters()
-
-	if err == nil {
-		var characterMessages []*protobufs.Character = make([]*protobufs.Character, len(characters))
-
-		for x := range characters {
-			characterMessages[x] = characters[x].CharacterMessage()
-		}
-
-		resp.Character = characterMessages
-	}
-
-	resp.User = user
-	resp.Id = &client.Id
-	resp.Division = make([]*protobufs.Division, 0, len(divisions))
-	resp.ActiveRegion = make([]protobufs.Region, 0, len(ladderActiveRegions))
-	resp.MapPool = maps.MapPoolMessage()
-
-	for x := range divisions {
-		resp.Division = append(resp.Division, divisions[x].DivisionMessage())
-	}
-	for _, region := range ladderActiveRegions {
-		resp.ActiveRegion = append(resp.ActiveRegion, protobufs.Region(region))
-	}
-	resp.MaxVetoes = &ladderMaxMapVetos
-	status = protobufs.HandshakeResponse_SUCCESS
-
-	return true
+func (conn *ClientConnection) OnChallengeDecline(txid int, data[]byte) {
+    return
 }
 
 func (conn *ClientConnection) SendResponseMessage(command string, txid int, data []byte) error {
 
-	conn.Lock()
-	defer conn.Unlock()
+    conn.Lock()
+    defer conn.Unlock()
 
-	var writer *bufio.Writer
+    var writer *bufio.Writer
 
-	switch conn.conn.(type) {
-	case net.Conn:
-		writer = conn.writer
-	case websocket.Conn:
-		ws := conn.conn.(websocket.Conn)
-		w, err := ws.NextWriter(websocket.TextMessage)
-		if err != nil {
-			return err
-		}
-		defer w.Close()
+    switch conn.conn.(type) {
+    case net.Conn:
+        writer = conn.writer
+    case websocket.Conn:
+        ws := conn.conn.(websocket.Conn)
+        w, err := ws.NextWriter(websocket.TextMessage)
+        if err != nil {
+            return err
+        }
+        defer w.Close()
 
-		writer = bufio.NewWriter(w)
+        writer = bufio.NewWriter(w)
 
-		if err != nil {
-			return err
-		}
+        if err != nil {
+            return err
+        }
 
-		// Base64 encode so we can safely send data as TextMessage over websocket.
-		// The flash fallback doesn't support BinaryMessage.
-		var encoded []byte = make([]byte, base64.StdEncoding.EncodedLen(len(data)))
-		base64.StdEncoding.Encode(encoded, data)
-		data = encoded
-	}
+        // Base64 encode so we can safely send data as TextMessage over websocket.
+        // The flash fallback doesn't support BinaryMessage.
+        var encoded []byte = make([]byte, base64.StdEncoding.EncodedLen(len(data)))
+        base64.StdEncoding.Encode(encoded, data)
+        data = encoded
+    }
 
-	var header string
-	if txid >= 0 {
-		header = fmt.Sprintf("%s %d %d", command, txid, len(data))
-	} else {
-		header = fmt.Sprintf("%s %d", command, len(data))
-	}
-	conn.logger.Println("send:", header)
+    var header string
+    if txid >= 0 {
+        header = fmt.Sprintf("%s %d %d", command, txid, len(data))
+    } else {
+        header = fmt.Sprintf("%s %d", command, len(data))
+    }
+    conn.logger.Println("send:", header)
 
-	_, err := writer.WriteString(header)
+    _, err := writer.WriteString(header)
 
-	if err != nil {
-		return err
-	}
+    if err != nil {
+        return err
+    }
 
-	err = writer.WriteByte('\n')
-	if err != nil {
-		return err
-	}
-	_, err = writer.Write(data)
-	if err != nil {
-		return err
-	}
-	err = writer.Flush()
-	if err != nil {
-		return err
-	}
+    err = writer.WriteByte('\n')
+    if err != nil {
+        return err
+    }
+    _, err = writer.Write(data)
+    if err != nil {
+        return err
+    }
+    err = writer.Flush()
+    if err != nil {
+        return err
+    }
 
-	return nil
+    return nil
 }
 
 func (conn *ClientConnection) SendServerMessage(command string, data []byte) error {
-	return conn.SendResponseMessage(command, -9001, data)
+    return conn.SendResponseMessage(command, -9001, data)
 }
 
 func (conn *ClientConnection) SendMarshalledResponseMessage(command string, txid int, msg proto.Message) error {
-	data, err := Marshal(msg)
-	if err != nil {
-		conn.SendError(ErrGeneric, txid)
-		return err
-	}
-	return conn.SendResponseMessage(command, txid, data)
+    data, err := Marshal(msg)
+    if err != nil {
+        conn.SendError(ErrGeneric, txid)
+        return err
+    }
+    return conn.SendResponseMessage(command, txid, data)
 }
 
 func (conn *ClientConnection) SendMarshalledServerMessage(command string, txid int, msg proto.Message) error {
-	data, err := Marshal(msg)
-	if err != nil {
-		conn.SendError(ErrGeneric, txid)
-		return err
-	}
-	return conn.SendServerMessage(command, data)
+    data, err := Marshal(msg)
+    if err != nil {
+        conn.SendError(ErrGeneric, txid)
+        return err
+    }
+    return conn.SendServerMessage(command, data)
 }
 
 func (conn *ClientConnection) SendError(err error, txid int) {
-	e, ok := err.(ErosError)
-	if ok {
-		conn.SendResponseMessage(fmt.Sprintf("%03v", e.Code()), txid, []byte(e.Error()))
-	} else {
-		conn.SendResponseMessage(fmt.Sprintf("%03v", ErrGeneric.Code()), txid, []byte(e.Error()))
-	}
+    e, ok := err.(ErosError)
+    if ok {
+        conn.SendResponseMessage(fmt.Sprintf("%03v", e.Code()), txid, []byte(e.Error()))
+    } else {
+        conn.SendResponseMessage(fmt.Sprintf("%03v", ErrGeneric.Code()), txid, []byte(e.Error()))
+    }
 }
 
 func (conn *ClientConnection) SendErrorWithCustomMessage(err ErosError, txid int, message string) {
-	conn.SendResponseMessage(fmt.Sprintf("%03v", err.Code()), txid, []byte(message))
+    conn.SendResponseMessage(fmt.Sprintf("%03v", err.Code()), txid, []byte(message))
 }

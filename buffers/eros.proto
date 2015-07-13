@@ -177,6 +177,14 @@ message Character {
 	optional int32 verification_portrait = 9;
 }
 
+message Challenge {
+    required string challengee = 1;
+}
+
+message ChallengeRequested {
+    required UserStats challenger = 1;
+}
+
 message OAuthRequest {
 	required Region region = 1;
 }
